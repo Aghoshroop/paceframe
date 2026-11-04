@@ -1,0 +1,455 @@
+"use client";
+
+import React, { useState, useEffect, useRef } from "react";
+import { Header } from "@/components/Header";
+import { DashboardView } from "@/components/DashboardView";
+import { CameraStudioView } from "@/components/CameraStudioView";
+import { LiveConsoleView } from "@/components/LiveConsoleView";
+import { ResultsView } from "@/components/ResultsView";
+import { HistoryView } from "@/components/HistoryView";
+import { PairingModal } from "@/components/PairingModal";
+import { SessionConfigModal } from "@/components/SessionConfigModal";
+import {
+  Session,
+  Athlete,
+  DetectionZone,
+  TimingResult,
+  TimingEvent,
+  DeviceRole,
+  ConnectedDevice,
+  SyncQuality,
+  ConnectionStatus,
+} from "@/types";
+import { TimingEngine } from "@/lib/timing/timingEngine";
+import { MeshNetworkManager } from "@/lib/network/meshNetwork";
+import { StorageDB } from "@/lib/storage/db";
+
+export default function PaceFrameApp() {
+  // Navigation View State
+  const [currentView, setCurrentView] = useState<
+    "dashboard" | "camera_studio" | "live_console" | "results" | "history"
+  >("dashboard");
+
+  // Device & Session Identifiers
+  const [sessionId, setSessionId] = useState<string>("PACE-101");
+  const [deviceId, setDeviceId] = useState<string>("");
+  const [deviceName, setDeviceName] = useState<string>("PACE Device");
+  const [deviceRole, setDeviceRole] = useState<DeviceRole>("master_console");
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("ready");
+  const [syncQuality, setSyncQuality] = useState<SyncQuality>({
+    rttMs: 0,
+    clockOffsetMs: 0,
+    jitterMs: 0.8,
+    samplesCount: 5,
+    quality: "excellent",
+  });
+
+  // Athletes and Sessions Database
+  const [athletes, setAthletes] = useState<Athlete[]>([]);
+  const [recentResults, setRecentResults] = useState<TimingResult[]>([]);
+  const [activeResult, setActiveResult] = useState<TimingResult | null>(null);
+
+  // Modals
+  const [isPairingOpen, setIsPairingOpen] = useState<boolean>(false);
+  const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
+
+  // Active Detection Zones (Line 1, Line 2...)
+  const [zones, setZones] = useState<DetectionZone[]>([]);
+
+  // Connected Devices List
+  const [connectedDevices, setConnectedDevices] = useState<ConnectedDevice[]>([]);
+
+  // Core Engine References
+  const timingEngineRef = useRef<TimingEngine | null>(null);
+  const meshNetworkRef = useRef<MeshNetworkManager | null>(null);
+
+  // Active Session Model
+  const [session, setSession] = useState<Session>({
+    sessionId: "PACE-101",
+    sessionName: "Flying 30m Sprint Profiling",
+    athleteId: "ath_lyles",
+    athleteName: "Marcus Vance",
+    eventName: "Flying 30m Velocity",
+    distanceMeters: 30,
+    isFlyingStart: true,
+    flyingDistanceMeters: 30,
+    startMethod: "hold_and_release",
+    sessionStatus: "idle",
+    targetLaps: 0,
+    zones: [],
+    devices: [],
+    createdAt: 0,
+  });
+
+  // Initialize App on Mount
+  useEffect(() => {
+    // 1. Load athletes and past results
+    const loadedAthletes = StorageDB.getAthletes();
+    const loadedResults = StorageDB.getResults();
+    setAthletes(loadedAthletes);
+    setRecentResults(loadedResults);
+    if (loadedResults.length > 0) {
+      setActiveResult(loadedResults[0]);
+    }
+
+    // 2. Generate or load device ID and name
+    const storedDeviceId =
+      typeof localStorage !== "undefined"
+        ? localStorage.getItem("paceframe_dev_id") ||
+          `dev_${Math.random().toString(36).substring(2, 9)}`
+        : `dev_${Math.random().toString(36).substring(2, 9)}`;
+
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("paceframe_dev_id", storedDeviceId);
+    }
+    setDeviceId(storedDeviceId);
+
+    // Device friendly name
+    const isMobile =
+      typeof navigator !== "undefined" &&
+      /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const friendlyName = isMobile ? "Trackside Mobile" : "Coach Workstation";
+    setDeviceName(friendlyName);
+
+    // 3. Check URL query params for ?session=XYZ
+    let targetSession = "PACE-101";
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const urlSession = params.get("session");
+      if (urlSession) {
+        targetSession = urlSession.toUpperCase();
+      }
+    }
+    setSessionId(targetSession);
+
+    // 4. Default Detection Zones
+    const defaultZones: DetectionZone[] = [
+      {
+        zoneId: "zone_finish_main",
+        deviceId: storedDeviceId,
+        zoneType: "finish",
+        name: "Finish Line",
+        lineCoordinates: { x1: 0.5, y1: 0.05, x2: 0.5, y2: 0.95 },
+        detectionDirection: "left_to_right",
+        confidenceThreshold: 0.6,
+        cooldownMs: 1500,
+        color: "#ccff00",
+        active: true,
+      },
+      {
+        zoneId: "zone_split_intermediate",
+        deviceId: storedDeviceId,
+        zoneType: "split",
+        name: "Intermediate Split",
+        lineCoordinates: { x1: 0.25, y1: 0.05, x2: 0.25, y2: 0.95 },
+        detectionDirection: "left_to_right",
+        confidenceThreshold: 0.6,
+        cooldownMs: 1500,
+        color: "#00f0ff",
+        active: false,
+      },
+    ];
+    setZones(defaultZones);
+
+    const initialSession: Session = {
+      sessionId: targetSession,
+      sessionName: "Flying 30m Sprint Profiling",
+      athleteId: loadedAthletes[0]?.athleteId || "ath_lyles",
+      athleteName: loadedAthletes[0]?.name || "Marcus Vance",
+      eventName: "Flying 30m Velocity",
+      distanceMeters: 30,
+      isFlyingStart: true,
+      flyingDistanceMeters: 30,
+      startMethod: "hold_and_release",
+      sessionStatus: "idle",
+      targetLaps: 0,
+      zones: defaultZones,
+      devices: [],
+      createdAt: Date.now(),
+    };
+    setSession(initialSession);
+
+    // 5. Initialize Authoritative Timing Engine
+    const engine = new TimingEngine(initialSession);
+    timingEngineRef.current = engine;
+
+    engine.subscribe({
+      onResultGenerated: (res) => {
+        const updated = StorageDB.saveResult(res);
+        setRecentResults(updated);
+        setActiveResult(res);
+        setCurrentView("results");
+      },
+    });
+
+    // 6. Initialize Multi-Device Mesh Network
+    const mesh = new MeshNetworkManager(
+      targetSession,
+      storedDeviceId,
+      friendlyName,
+      "master_console",
+      true // Initial device starts as Authority
+    );
+    meshNetworkRef.current = mesh;
+
+    mesh.init({
+      onDeviceListUpdate: (devs) => {
+        setConnectedDevices(devs);
+      },
+      onTimingEventReceived: (event) => {
+        // Feed remote event into timing engine
+        engine.processEvent(event, mesh.getClockSync().getQuality());
+      },
+      onRoleAssigned: (newRole) => {
+        setDeviceRole(newRole);
+      },
+      onSyncQualityUpdate: (quality) => {
+        setSyncQuality(quality);
+      },
+      onConnectionStatusChange: (status) => {
+        setConnectionStatus(status);
+      },
+      onManualTriggerReceived: (trigger) => {
+        if (trigger.type === "ARM") {
+          engine.arm();
+        } else if (trigger.type === "START") {
+          engine.manualOverride("START", trigger.timestamp);
+        } else if (trigger.type === "STOP") {
+          engine.manualOverride("FINISH", trigger.timestamp);
+        }
+      },
+    });
+
+    return () => {
+      mesh.destroy();
+    };
+  }, []);
+
+  // Handle local camera timing crossing event
+  const handleTimingEventDetected = (event: TimingEvent) => {
+    // 1. Process locally in timing engine
+    if (timingEngineRef.current) {
+      timingEngineRef.current.processEvent(
+        event,
+        syncQuality,
+        {
+          cameraFps: 60,
+          processingFps: 60,
+          droppedFrames: 0,
+          frameLatencyMs: 16.6,
+          resolution: { width: 1280, height: 720 },
+        }
+      );
+    }
+
+    // 2. Broadcast to all connected devices in mesh
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.emitTimingEvent(event);
+    }
+  };
+
+  // Handle manual trigger (Hold & Release or manual override)
+  const handleManualTrigger = (type: "ARM" | "START" | "STOP") => {
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.emitManualTrigger(type);
+    }
+  };
+
+  // Handle device role change
+  const handleRoleChange = (newRole: DeviceRole) => {
+    setDeviceRole(newRole);
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.setRole(newRole);
+    }
+  };
+
+  // Handle remote role assignment
+  const handleAssignRemoteRole = (targetDeviceId: string, newRole: DeviceRole) => {
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.assignRemoteDeviceRole(targetDeviceId, newRole);
+    }
+  };
+
+  // Join a new session ID
+  const handleJoinSession = (newSessionId: string) => {
+    setSessionId(newSessionId);
+    const updated = { ...session, sessionId: newSessionId };
+    setSession(updated);
+
+    if (timingEngineRef.current) {
+      timingEngineRef.current.updateSession(updated);
+      timingEngineRef.current.reset();
+    }
+
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.destroy();
+      const mesh = new MeshNetworkManager(
+        newSessionId,
+        deviceId,
+        deviceName,
+        "secondary_camera",
+        false // Joining device is client
+      );
+      meshNetworkRef.current = mesh;
+      mesh.init({
+        onDeviceListUpdate: (devs) => setConnectedDevices(devs),
+        onTimingEventReceived: (event) =>
+          timingEngineRef.current?.processEvent(event, mesh.getClockSync().getQuality()),
+        onRoleAssigned: (role) => setDeviceRole(role),
+        onSyncQualityUpdate: (quality) => setSyncQuality(quality),
+        onConnectionStatusChange: (s) => setConnectionStatus(s),
+      });
+    }
+  };
+
+  // Clock sync trigger
+  const handleTriggerClockSync = () => {
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.broadcastMessage("CLOCK_PING", { t1: performance.now() });
+    }
+  };
+
+  // Update session settings
+  const handleSaveSessionConfig = (updates: Partial<Session>) => {
+    const updated = { ...session, ...updates };
+    setSession(updated);
+    if (timingEngineRef.current) {
+      timingEngineRef.current.updateSession(updated);
+    }
+    StorageDB.saveSession(updated);
+  };
+
+  // Add new athlete
+  const handleAddNewAthlete = (name: string, team?: string): Athlete => {
+    const newAthlete: Athlete = {
+      athleteId: `ath_${Date.now()}`,
+      name,
+      teamId: team || "Independent",
+      bibNumber: (Math.floor(Math.random() * 800) + 100).toString(),
+      category: "Senior",
+    };
+    const updatedList = StorageDB.saveAthlete(newAthlete);
+    setAthletes(updatedList);
+    return newAthlete;
+  };
+
+  // Update detection zones
+  const handleUpdateZones = (newZones: DetectionZone[]) => {
+    setZones(newZones);
+    const updatedSession = { ...session, zones: newZones };
+    setSession(updatedSession);
+    if (timingEngineRef.current) {
+      timingEngineRef.current.updateSession(updatedSession);
+    }
+  };
+
+  return (
+    <div className="flex h-screen w-screen flex-col bg-[#0a0c0f] text-[#f3f4f6] overflow-hidden select-none">
+      {/* Top Professional Status Header */}
+      <Header
+        currentView={currentView}
+        onSelectView={setCurrentView}
+        sessionId={sessionId}
+        deviceRole={deviceRole}
+        onRoleChange={handleRoleChange}
+        syncQuality={syncQuality}
+        connectionStatus={connectionStatus}
+        connectedDevicesCount={connectedDevices.length}
+        onOpenPairing={() => setIsPairingOpen(true)}
+      />
+
+      {/* Main Responsive Screen Viewport */}
+      <main className="flex-1 flex flex-col overflow-hidden relative">
+        {currentView === "dashboard" && (
+          <DashboardView
+            currentSession={session}
+            recentResults={recentResults}
+            athletes={athletes}
+            deviceRole={deviceRole}
+            syncQuality={syncQuality}
+            connectedDevicesCount={connectedDevices.length}
+            onOpenSessionConfig={() => setIsConfigOpen(true)}
+            onOpenPairing={() => setIsPairingOpen(true)}
+            onOpenStudio={() => setCurrentView("camera_studio")}
+            onOpenConsole={() => setCurrentView("live_console")}
+            onOpenHistory={() => setCurrentView("history")}
+            onSelectResult={(res) => {
+              setActiveResult(res);
+              setCurrentView("results");
+            }}
+          />
+        )}
+
+        {currentView === "camera_studio" && (
+          <CameraStudioView
+            zones={zones}
+            onUpdateZones={handleUpdateZones}
+            deviceRole={deviceRole}
+            sessionId={sessionId}
+            deviceId={deviceId}
+            deviceName={deviceName}
+            clockOffsetMs={syncQuality.clockOffsetMs}
+            onTimingEventDetected={handleTimingEventDetected}
+            onOpenLiveConsole={() => setCurrentView("live_console")}
+          />
+        )}
+
+        {currentView === "live_console" && timingEngineRef.current && (
+          <LiveConsoleView
+            session={session}
+            timingEngine={timingEngineRef.current}
+            connectedDevices={connectedDevices}
+            onOpenResults={(res) => {
+              setActiveResult(res);
+              setCurrentView("results");
+            }}
+            onOpenStudio={() => setCurrentView("camera_studio")}
+            onManualTrigger={handleManualTrigger}
+          />
+        )}
+
+        {currentView === "results" && (
+          <ResultsView
+            result={activeResult}
+            onBackToConsole={() => setCurrentView("live_console")}
+            onNewAttempt={() => {
+              timingEngineRef.current?.reset();
+              setCurrentView("live_console");
+            }}
+          />
+        )}
+
+        {currentView === "history" && (
+          <HistoryView
+            athletes={athletes}
+            onInspectResult={(res) => {
+              setActiveResult(res);
+              setCurrentView("results");
+            }}
+          />
+        )}
+      </main>
+
+      {/* Device Pairing Modal */}
+      <PairingModal
+        isOpen={isPairingOpen}
+        onClose={() => setIsPairingOpen(false)}
+        sessionId={sessionId}
+        connectedDevices={connectedDevices}
+        onAssignRole={handleAssignRemoteRole}
+        onJoinSession={handleJoinSession}
+        onTriggerClockSync={handleTriggerClockSync}
+      />
+
+      {/* Session Configuration Modal */}
+      <SessionConfigModal
+        isOpen={isConfigOpen}
+        onClose={() => setIsConfigOpen(false)}
+        athletes={athletes}
+        currentSession={session}
+        onSaveSession={handleSaveSessionConfig}
+        onAddNewAthlete={handleAddNewAthlete}
+      />
+    </div>
+  );
+}
