@@ -344,7 +344,7 @@ export default function PaceFrameApp() {
   };
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-[#0a0c0f] text-[#f3f4f6] overflow-hidden select-none">
+    <div className="flex h-full min-h-[100dvh] max-h-[100dvh] w-full flex-col bg-[#0a0c0f] text-[#f3f4f6] overflow-hidden select-none">
       {/* Top Professional Status Header */}
       <Header
         currentView={currentView}
