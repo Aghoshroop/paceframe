@@ -130,7 +130,7 @@ export default function PaceFrameApp() {
         zoneType: "finish",
         name: "Finish Line",
         lineCoordinates: { x1: 0.5, y1: 0.05, x2: 0.5, y2: 0.95 },
-        detectionDirection: "left_to_right",
+        detectionDirection: "bidirectional",
         confidenceThreshold: 0.6,
         cooldownMs: 1500,
         color: "#ccff00",
@@ -142,7 +142,7 @@ export default function PaceFrameApp() {
         zoneType: "split",
         name: "Intermediate Split",
         lineCoordinates: { x1: 0.25, y1: 0.05, x2: 0.25, y2: 0.95 },
-        detectionDirection: "left_to_right",
+        detectionDirection: "bidirectional",
         confidenceThreshold: 0.6,
         cooldownMs: 1500,
         color: "#00f0ff",
@@ -178,7 +178,7 @@ export default function PaceFrameApp() {
         const updated = StorageDB.saveResult(res);
         setRecentResults(updated);
         setActiveResult(res);
-        setCurrentView("results");
+        // Keep coach in Live Console so they see the stopped timer and photo-finish freeze frame
       },
     });
 
@@ -399,6 +399,13 @@ export default function PaceFrameApp() {
             session={session}
             timingEngine={timingEngineRef.current}
             connectedDevices={connectedDevices}
+            zones={zones}
+            onUpdateZones={handleUpdateZones}
+            sessionId={sessionId}
+            deviceId={deviceId}
+            deviceName={deviceName}
+            clockOffsetMs={syncQuality.clockOffsetMs}
+            onTimingEventDetected={handleTimingEventDetected}
             onOpenResults={(res) => {
               setActiveResult(res);
               setCurrentView("results");

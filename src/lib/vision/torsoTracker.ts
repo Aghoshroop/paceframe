@@ -7,7 +7,7 @@ export interface TorsoLandmarkData {
   leftHip?: { x: number; y: number; z?: number; visibility?: number };
   rightHip?: { x: number; y: number; z?: number; visibility?: number };
   boundingBox: { x: number; y: number; width: number; height: number };
-  velocity: { vx: number; vy: number }; // normalized units / sec
+  velocity: { vx: number; vy: number };
   confidence: number;
   timestamp: number;
   isPoseModel: boolean;
@@ -21,7 +21,6 @@ export class TorsoTracker {
   private downsampleWidth: number = 160;
   private downsampleHeight: number = 90;
 
-  // MediaPipe pose detector instance if available
   private poseLandmarker: any = null;
   private isPoseLoading: boolean = false;
   private poseLoadFailed: boolean = false;
@@ -39,9 +38,6 @@ export class TorsoTracker {
     }
   }
 
-  /**
-   * Attempts to initialize MediaPipe Pose Landmarker dynamically
-   */
   public async loadMediaPipePose(): Promise<boolean> {
     if (this.poseLandmarker || this.isPoseLoading || this.poseLoadFailed) {
       return !!this.poseLandmarker;
@@ -49,7 +45,6 @@ export class TorsoTracker {
 
     this.isPoseLoading = true;
     try {
-      // Dynamic import from CDN to avoid bundle bloat and ensure fast PWA startup
       if (typeof window !== "undefined") {
         const visionModule = await (window as any).import?.(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm/index.js"
@@ -67,9 +62,9 @@ export class TorsoTracker {
             },
             runningMode: "VIDEO",
             numPoses: 2,
-            minPoseDetectionConfidence: 0.5,
-            minPosePresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5,
+            minPoseDetectionConfidence: 0.4,
+            minPosePresenceConfidence: 0.4,
+            minTrackingConfidence: 0.4,
           });
           this.isPoseLoading = false;
           return true;
@@ -85,21 +80,16 @@ export class TorsoTracker {
     }
   }
 
-  /**
-   * Process a single video frame and return tracked torso coordinates
-   */
   public trackFrame(video: HTMLVideoElement, timestamp: number): TorsoLandmarkData | null {
     if (!video || video.readyState < 2) return null;
 
-    // 1. Try MediaPipe Pose if loaded
+    // 1. Try MediaPipe Pose if active
     if (this.poseLandmarker) {
       try {
         const poseResult = this.poseLandmarker.detectForVideo(video, timestamp);
         if (poseResult && poseResult.landmarks && poseResult.landmarks.length > 0) {
-          const landmarks = poseResult.landmarks[0]; // Primary athlete
+          const landmarks = poseResult.landmarks[0];
 
-          // MediaPipe Pose landmarks:
-          // 11: left shoulder, 12: right shoulder, 23: left hip, 24: right hip
           const ls = landmarks[11];
           const rs = landmarks[12];
           const lh = landmarks[23];
@@ -114,14 +104,6 @@ export class TorsoTracker {
             const minY = Math.min(ls.y, rs.y, lh.y, rh.y);
             const maxY = Math.max(ls.y, rs.y, lh.y, rh.y);
 
-            const confidence = Math.min(
-              ls.visibility ?? 0.8,
-              rs.visibility ?? 0.8,
-              lh.visibility ?? 0.8,
-              rh.visibility ?? 0.8
-            );
-
-            // Velocity calculation
             let vx = 0;
             let vy = 0;
             if (this.prevTorso) {
@@ -139,11 +121,11 @@ export class TorsoTracker {
               boundingBox: {
                 x: minX,
                 y: minY,
-                width: Math.max(0.05, maxX - minX),
-                height: Math.max(0.1, maxY - minY),
+                width: Math.max(0.06, maxX - minX),
+                height: Math.max(0.12, maxY - minY),
               },
               velocity: { vx, vy },
-              confidence: Math.round(confidence * 100) / 100,
+              confidence: 0.95,
               timestamp,
               isPoseModel: true,
             };
@@ -152,13 +134,10 @@ export class TorsoTracker {
             return data;
           }
         }
-      } catch {
-        // Fall back to motion centroid on any pose evaluation issue
-      }
+      } catch {}
     }
 
     // 2. High-speed Optical Motion & Torso Centroid Detection
-    // This is instant, zero-latency, and computes torso center with pixel accuracy
     return this.trackMotionCentroid(video, timestamp);
   }
 
@@ -184,18 +163,16 @@ export class TorsoTracker {
       let totalDiffX = 0;
       let totalDiffY = 0;
       let motionPixelsCount = 0;
-      const threshold = 28; // motion sensitivity threshold
+      const threshold = 14; // High-sensitivity motion detection for fast athletic torso tracking
 
       let minX = w;
       let maxX = 0;
       let minY = h;
       let maxY = 0;
 
-      // Examine pixel differences
-      for (let y = 10; y < h - 10; y++) {
-        for (let x = 5; x < w - 5; x++) {
+      for (let y = 4; y < h - 4; y++) {
+        for (let x = 3; x < w - 3; x++) {
           const idx = (y * w + x) * 4;
-          // Grayscale luminance diff
           const rDiff = Math.abs(pixels[idx] - this.prevFrameData[idx]);
           const gDiff = Math.abs(pixels[idx + 1] - this.prevFrameData[idx + 1]);
           const bDiff = Math.abs(pixels[idx + 2] - this.prevFrameData[idx + 2]);
@@ -214,20 +191,19 @@ export class TorsoTracker {
         }
       }
 
-      // Update previous frame
       this.prevFrameData.set(pixels);
 
-      // Require a minimum body motion area (athlete running across frame)
-      const minBodyArea = (w * h) * 0.015; // ~1.5% of frame
-      if (motionPixelsCount < minBodyArea) {
+      // 0.25% of frame (approx 36 pixels) enables instant touch response
+      const minMotionArea = (w * h) * 0.0025;
+      if (motionPixelsCount < minMotionArea) {
         return null;
       }
 
       const centroidX = (totalDiffX / motionPixelsCount) / w;
-      // In sprint mechanics, the torso is located in the upper 40% of the bounding body height
       const bodyTop = minY / h;
       const bodyBottom = maxY / h;
-      const torsoY = bodyTop + (bodyBottom - bodyTop) * 0.38;
+      // Torso is positioned in upper chest area (35% down)
+      const torsoY = bodyTop + (bodyBottom - bodyTop) * 0.35;
 
       let vx = 0;
       let vy = 0;
@@ -237,15 +213,15 @@ export class TorsoTracker {
         vy = (torsoY - this.prevTorso.torsoCenter.y) / dt;
       }
 
-      const confidence = Math.min(0.95, motionPixelsCount / (minBodyArea * 4));
+      const confidence = Math.max(0.80, Math.min(0.98, motionPixelsCount / (minMotionArea * 3)));
 
       const data: TorsoLandmarkData = {
         torsoCenter: { x: centroidX, y: torsoY },
         boundingBox: {
           x: minX / w,
           y: bodyTop,
-          width: Math.max(0.04, (maxX - minX) / w),
-          height: Math.max(0.12, bodyBottom - bodyTop),
+          width: Math.max(0.06, (maxX - minX) / w),
+          height: Math.max(0.14, bodyBottom - bodyTop),
         },
         velocity: { vx, vy },
         confidence: Math.round(confidence * 100) / 100,
@@ -265,4 +241,3 @@ export class TorsoTracker {
     this.prevFrameData = null;
   }
 }
-

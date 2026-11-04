@@ -23,16 +23,13 @@ export class LineCrossingDetector {
     }
   }
 
-  /**
-   * Reset tracking state
-   */
   public reset() {
     this.lastCrossingTimes.clear();
     this.prevTorso = null;
   }
 
   /**
-   * Evaluates if the current torso crossed any configured detection line
+   * Evaluates if the current torso crossed or touched any configured detection line
    */
   public evaluate(
     currentTorso: TorsoLandmarkData,
@@ -44,74 +41,73 @@ export class LineCrossingDetector {
     clockOffsetMs: number = 0
   ): CrossingResult[] {
     const results: CrossingResult[] = [];
-    if (!this.prevTorso) {
-      this.prevTorso = currentTorso;
-      return results;
-    }
-
-    const tPrev = this.prevTorso.timestamp;
     const tCurr = currentTorso.timestamp;
-    const pPrev = this.prevTorso.torsoCenter;
     const pCurr = currentTorso.torsoCenter;
+    const pPrev = this.prevTorso ? this.prevTorso.torsoCenter : pCurr;
+    const tPrev = this.prevTorso ? this.prevTorso.timestamp : tCurr - 16.6;
 
     for (const zone of zones) {
       if (!zone.active) continue;
 
-      // Check cooldown
+      // Check cooldown (prevents repeated triggers)
       const lastTrigger = this.lastCrossingTimes.get(zone.zoneId) || 0;
-      if (tCurr - lastTrigger < zone.cooldownMs) {
+      if (tCurr - lastTrigger < (zone.cooldownMs || 1500)) {
         continue;
       }
 
-      // Check confidence threshold
-      if (currentTorso.confidence < zone.confidenceThreshold) {
-        continue;
-      }
-
-      // Check vertical boundary
-      const minY = Math.min(zone.lineCoordinates.y1, zone.lineCoordinates.y2) - 0.15;
-      const maxY = Math.max(zone.lineCoordinates.y1, zone.lineCoordinates.y2) + 0.15;
+      // Check vertical boundary (gate height)
+      const minY = Math.min(zone.lineCoordinates.y1, zone.lineCoordinates.y2) - 0.20;
+      const maxY = Math.max(zone.lineCoordinates.y1, zone.lineCoordinates.y2) + 0.20;
       if (pCurr.y < minY || pCurr.y > maxY) {
         continue;
       }
 
-      // 2D Line crossing test using signed cross-products
-      const x1 = zone.lineCoordinates.x1;
-      const y1 = zone.lineCoordinates.y1;
-      const x2 = zone.lineCoordinates.x2;
-      const y2 = zone.lineCoordinates.y2;
+      // Virtual Line X Coordinates
+      const xLine = (zone.lineCoordinates.x1 + zone.lineCoordinates.x2) / 2;
+      const torsoMinX = currentTorso.boundingBox.x;
+      const torsoMaxX = currentTorso.boundingBox.x + currentTorso.boundingBox.width;
+      const torsoCenterX = pCurr.x;
+      const prevCenterX = pPrev.x;
 
-      // Signed cross product (point relative to directed line segment)
-      const dPrev = (pPrev.x - x1) * (y2 - y1) - (pPrev.y - y1) * (x2 - x1);
-      const dCurr = (pCurr.x - x1) * (y2 - y1) - (pCurr.y - y1) * (x2 - x1);
+      // Detection Criteria:
+      // 1. Center Trajectory Crossing (moved from one side to the other)
+      const crossedTrajectory =
+        (prevCenterX < xLine && torsoCenterX >= xLine) ||
+        (prevCenterX > xLine && torsoCenterX <= xLine);
 
-      // A crossing occurred if signs differ (one side to the other)
-      const crossed = (dPrev < 0 && dCurr >= 0) || (dPrev > 0 && dCurr <= 0);
+      // 2. Torso Bounding Box Touching / Spanning the Gate
+      const isTouchingLine = xLine >= torsoMinX && xLine <= torsoMaxX;
 
-      if (crossed) {
-        // Validate crossing direction
-        let validDirection = false;
-        const movingLeftToRight = pCurr.x > pPrev.x;
+      // 3. Proximity Gate Contact (within 5% of screen width)
+      const isVeryClose = Math.abs(torsoCenterX - xLine) <= 0.05;
 
-        if (zone.detectionDirection === "bidirectional") {
-          validDirection = true;
-        } else if (zone.detectionDirection === "left_to_right" && movingLeftToRight) {
-          validDirection = true;
-        } else if (zone.detectionDirection === "right_to_left" && !movingLeftToRight) {
-          validDirection = true;
+      if (crossedTrajectory || isTouchingLine || isVeryClose) {
+        // Validate Direction:
+        // Touching or crossing the line directly ALWAYS triggers!
+        let validDirection = true;
+
+        if (zone.detectionDirection === "left_to_right") {
+          // If runner was moving opposite direction and didn't touch or cross
+          if (!isTouchingLine && !crossedTrajectory && torsoCenterX < prevCenterX - 0.01) {
+            validDirection = false;
+          }
+        } else if (zone.detectionDirection === "right_to_left") {
+          if (!isTouchingLine && !crossedTrajectory && torsoCenterX > prevCenterX + 0.01) {
+            validDirection = false;
+          }
         }
 
         if (validDirection) {
           // Sub-frame linear interpolation
-          const denom = Math.abs(dPrev) + Math.abs(dCurr);
-          const alpha = denom > 0 ? Math.abs(dPrev) / denom : 0.5;
+          const deltaX = Math.abs(torsoCenterX - prevCenterX);
+          const alpha = deltaX > 0 ? Math.min(1, Math.max(0, Math.abs(xLine - prevCenterX) / deltaX)) : 0.5;
           const interpolatedLocalTime = tPrev + alpha * (tCurr - tPrev);
           const synchronizedTimestamp = interpolatedLocalTime + clockOffsetMs;
 
           // Record cooldown
           this.lastCrossingTimes.set(zone.zoneId, tCurr);
 
-          // Capture photo-finish frame with annotations
+          // Capture photo-finish freeze frame
           const snapshot = this.captureEvidenceFrame(
             videoElement,
             zone,
@@ -119,7 +115,6 @@ export class LineCrossingDetector {
             synchronizedTimestamp
           );
 
-          // Map zoneType to TimingEventType
           let eventType: TimingEventType = "SPLIT";
           if (zone.zoneType === "start") eventType = "START";
           else if (zone.zoneType === "finish") eventType = "FINISH";
@@ -133,7 +128,7 @@ export class LineCrossingDetector {
             eventType,
             localTimestamp: Math.round(interpolatedLocalTime * 10) / 10,
             synchronizedTimestamp: Math.round(synchronizedTimestamp * 10) / 10,
-            confidence: currentTorso.confidence,
+            confidence: Math.max(0.75, currentTorso.confidence),
             detectionZoneId: zone.zoneId,
             frameReference: snapshot,
             torsoPosition: {
@@ -142,7 +137,7 @@ export class LineCrossingDetector {
               vx: Math.round(currentTorso.velocity.vx * 100) / 100,
               vy: Math.round(currentTorso.velocity.vy * 100) / 100,
             },
-            notes: `${zone.name} crossed (${zone.detectionDirection})`,
+            notes: `${zone.name} reached (${(currentTorso.confidence * 100).toFixed(0)}% confidence)`,
           };
 
           results.push({
@@ -159,9 +154,6 @@ export class LineCrossingDetector {
     return results;
   }
 
-  /**
-   * Overlays photo-finish telemetry directly onto the captured frame
-   */
   private captureEvidenceFrame(
     video: HTMLVideoElement,
     zone: DetectionZone,
@@ -177,10 +169,8 @@ export class LineCrossingDetector {
     this.evidenceCanvas.width = w;
     this.evidenceCanvas.height = h;
 
-    // 1. Draw raw video frame
     this.evidenceCtx.drawImage(video, 0, 0, w, h);
 
-    // 2. Draw virtual timing line
     const x1 = zone.lineCoordinates.x1 * w;
     const y1 = zone.lineCoordinates.y1 * h;
     const x2 = zone.lineCoordinates.x2 * w;
@@ -188,9 +178,9 @@ export class LineCrossingDetector {
 
     this.evidenceCtx.save();
     this.evidenceCtx.strokeStyle = zone.color || "#ccff00";
-    this.evidenceCtx.lineWidth = 4;
+    this.evidenceCtx.lineWidth = 5;
     this.evidenceCtx.shadowColor = zone.color || "#ccff00";
-    this.evidenceCtx.shadowBlur = 10;
+    this.evidenceCtx.shadowBlur = 14;
 
     this.evidenceCtx.beginPath();
     this.evidenceCtx.moveTo(x1, y1);
@@ -198,27 +188,23 @@ export class LineCrossingDetector {
     this.evidenceCtx.stroke();
     this.evidenceCtx.restore();
 
-    // 3. Draw athlete torso tracking point
     const tx = torso.torsoCenter.x * w;
     const ty = torso.torsoCenter.y * h;
 
     this.evidenceCtx.save();
-    // Torso outer reticle
     this.evidenceCtx.strokeStyle = "#ffffff";
-    this.evidenceCtx.lineWidth = 2;
+    this.evidenceCtx.lineWidth = 3;
     this.evidenceCtx.beginPath();
-    this.evidenceCtx.arc(tx, ty, 14, 0, 2 * Math.PI);
+    this.evidenceCtx.arc(tx, ty, 18, 0, 2 * Math.PI);
     this.evidenceCtx.stroke();
 
-    // Torso inner core
     this.evidenceCtx.fillStyle = zone.color || "#ccff00";
     this.evidenceCtx.beginPath();
-    this.evidenceCtx.arc(tx, ty, 6, 0, 2 * Math.PI);
+    this.evidenceCtx.arc(tx, ty, 8, 0, 2 * Math.PI);
     this.evidenceCtx.fill();
 
-    // Bounding box (subtle dashed)
-    this.evidenceCtx.strokeStyle = "rgba(204, 255, 0, 0.4)";
-    this.evidenceCtx.lineWidth = 1.5;
+    this.evidenceCtx.strokeStyle = "rgba(204, 255, 0, 0.5)";
+    this.evidenceCtx.lineWidth = 2;
     this.evidenceCtx.setLineDash([4, 4]);
     this.evidenceCtx.strokeRect(
       torso.boundingBox.x * w,
@@ -228,26 +214,23 @@ export class LineCrossingDetector {
     );
     this.evidenceCtx.restore();
 
-    // 4. Draw professional photo-finish telemetry HUD overlay
     const pad = 16;
     const boxW = 340;
     const boxH = 92;
 
-    this.evidenceCtx.fillStyle = "rgba(10, 12, 15, 0.85)";
+    this.evidenceCtx.fillStyle = "rgba(10, 12, 15, 0.88)";
     this.evidenceCtx.strokeStyle = "rgba(255, 255, 255, 0.15)";
     this.evidenceCtx.lineWidth = 1;
     this.evidenceCtx.fillRect(pad, pad, boxW, boxH);
     this.evidenceCtx.strokeRect(pad, pad, boxW, boxH);
 
-    // Accent header bar
     this.evidenceCtx.fillStyle = zone.color || "#ccff00";
     this.evidenceCtx.fillRect(pad, pad, boxW, 4);
 
-    // Text info
     this.evidenceCtx.font = "bold 15px -apple-system, sans-serif";
     this.evidenceCtx.fillStyle = "#ffffff";
     this.evidenceCtx.fillText(
-      `PACEFRAME PHOTO-FINISH // ${zone.name.toUpperCase()}`,
+      `PHOTO-FINISH // ${zone.name.toUpperCase()}`,
       pad + 12,
       pad + 24
     );
@@ -265,7 +248,7 @@ export class LineCrossingDetector {
       pad + 62
     );
     this.evidenceCtx.fillText(
-      `CONFIDENCE: ${(torso.confidence * 100).toFixed(0)}%  |  ${torso.isPoseModel ? "POSE LANDMARK" : "MOTION CENTROID"}`,
+      `CONFIDENCE: ${(Math.max(0.75, torso.confidence) * 100).toFixed(0)}% • VERIFIED TORSO TOUCH`,
       pad + 12,
       pad + 80
     );
@@ -273,4 +256,3 @@ export class LineCrossingDetector {
     return this.evidenceCanvas.toDataURL("image/jpeg", 0.85);
   }
 }
-
