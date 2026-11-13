@@ -5,9 +5,12 @@ import { Header } from "@/components/Header";
 import { DashboardView } from "@/components/DashboardView";
 import { CameraStudioView } from "@/components/CameraStudioView";
 import { LiveConsoleView } from "@/components/LiveConsoleView";
+import { GateCameraView } from "@/components/GateCameraView";
 import { ResultsView } from "@/components/ResultsView";
 import { HistoryView } from "@/components/HistoryView";
 import { PairingModal } from "@/components/PairingModal";
+import { GateQRModal } from "@/components/GateQRModal";
+import { QRScannerModal } from "@/components/QRScannerModal";
 import { SessionConfigModal } from "@/components/SessionConfigModal";
 import {
   Session,
@@ -25,10 +28,10 @@ import { MeshNetworkManager } from "@/lib/network/meshNetwork";
 import { StorageDB } from "@/lib/storage/db";
 
 export default function PaceFrameApp() {
-  // Navigation View State
+  // Navigation View State - default to live_console for instant readiness
   const [currentView, setCurrentView] = useState<
-    "dashboard" | "camera_studio" | "live_console" | "results" | "history"
-  >("dashboard");
+    "dashboard" | "camera_studio" | "live_console" | "results" | "history" | "gate_camera"
+  >("live_console");
 
   // Device & Session Identifiers
   const [sessionId, setSessionId] = useState<string>("PACE-101");
@@ -49,9 +52,12 @@ export default function PaceFrameApp() {
   const [recentResults, setRecentResults] = useState<TimingResult[]>([]);
   const [activeResult, setActiveResult] = useState<TimingResult | null>(null);
 
-  // Modals
+  // Modals State
   const [isPairingOpen, setIsPairingOpen] = useState<boolean>(false);
   const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
+  const [isGateQROpen, setIsGateQROpen] = useState<boolean>(false);
+  const [isQRScannerOpen, setIsQRScannerOpen] = useState<boolean>(false);
+  const [gateModalRole, setGateModalRole] = useState<DeviceRole>("finish_camera");
 
   // Active Detection Zones (Line 1, Line 2...)
   const [zones, setZones] = useState<DetectionZone[]>([]);
@@ -111,16 +117,34 @@ export default function PaceFrameApp() {
     const friendlyName = isMobile ? "Trackside Mobile" : "Coach Workstation";
     setDeviceName(friendlyName);
 
-    // 3. Check URL query params for ?session=XYZ
+    // 3. Check URL query params for ?session=XYZ and ?role=finish_camera
     let targetSession = "PACE-101";
+    let initialRole: DeviceRole = "master_console";
+    let initialView: "dashboard" | "camera_studio" | "live_console" | "results" | "history" | "gate_camera" = "live_console";
+
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const urlSession = params.get("session");
       if (urlSession) {
         targetSession = urlSession.toUpperCase();
       }
+      const urlRole = params.get("role") as DeviceRole | null;
+      if (urlRole) {
+        initialRole = urlRole;
+        if (
+          urlRole === "finish_camera" ||
+          urlRole === "start_camera" ||
+          urlRole === "split_camera" ||
+          urlRole === "lap_camera" ||
+          urlRole === "secondary_camera"
+        ) {
+          initialView = "gate_camera";
+        }
+      }
     }
     setSessionId(targetSession);
+    setDeviceRole(initialRole);
+    setCurrentView(initialView);
 
     // 4. Default Detection Zones
     const defaultZones: DetectionZone[] = [
@@ -183,12 +207,13 @@ export default function PaceFrameApp() {
     });
 
     // 6. Initialize Multi-Device Mesh Network
+    const isAuthority = initialRole === "master_console";
     const mesh = new MeshNetworkManager(
       targetSession,
       storedDeviceId,
       friendlyName,
-      "master_console",
-      true // Initial device starts as Authority
+      initialRole,
+      isAuthority
     );
     meshNetworkRef.current = mesh;
 
@@ -202,6 +227,16 @@ export default function PaceFrameApp() {
       },
       onRoleAssigned: (newRole) => {
         setDeviceRole(newRole);
+        if (
+          newRole === "finish_camera" ||
+          newRole === "start_camera" ||
+          newRole === "split_camera" ||
+          newRole === "lap_camera"
+        ) {
+          setCurrentView("gate_camera");
+        } else if (newRole === "master_console") {
+          setCurrentView("live_console");
+        }
       },
       onSyncQualityUpdate: (quality) => {
         setSyncQuality(quality);
@@ -283,22 +318,63 @@ export default function PaceFrameApp() {
 
     if (meshNetworkRef.current) {
       meshNetworkRef.current.destroy();
+      const isAuthority = deviceRole === "master_console";
       const mesh = new MeshNetworkManager(
         newSessionId,
         deviceId,
         deviceName,
-        "secondary_camera",
-        false // Joining device is client
+        deviceRole,
+        isAuthority
       );
       meshNetworkRef.current = mesh;
       mesh.init({
         onDeviceListUpdate: (devs) => setConnectedDevices(devs),
         onTimingEventReceived: (event) =>
           timingEngineRef.current?.processEvent(event, mesh.getClockSync().getQuality()),
-        onRoleAssigned: (role) => setDeviceRole(role),
+        onRoleAssigned: (role) => {
+          setDeviceRole(role);
+          if (
+            role === "finish_camera" ||
+            role === "start_camera" ||
+            role === "split_camera" ||
+            role === "lap_camera"
+          ) {
+            setCurrentView("gate_camera");
+          }
+        },
         onSyncQualityUpdate: (quality) => setSyncQuality(quality),
         onConnectionStatusChange: (s) => setConnectionStatus(s),
+        onManualTriggerReceived: (trigger) => {
+          if (trigger.type === "ARM") {
+            timingEngineRef.current?.arm();
+          } else if (trigger.type === "START") {
+            timingEngineRef.current?.manualOverride("START", trigger.timestamp);
+          } else if (trigger.type === "STOP") {
+            timingEngineRef.current?.manualOverride("FINISH", trigger.timestamp);
+          }
+        },
       });
+    }
+  };
+
+  // Handle scan success from in-app QR scanner
+  const handleScanSuccess = (scannedSessionId: string, scannedRole?: string) => {
+    setIsQRScannerOpen(false);
+    handleJoinSession(scannedSessionId);
+
+    const targetRole: DeviceRole = (scannedRole as DeviceRole) || "finish_camera";
+    handleRoleChange(targetRole);
+
+    if (
+      targetRole === "finish_camera" ||
+      targetRole === "start_camera" ||
+      targetRole === "split_camera" ||
+      targetRole === "lap_camera" ||
+      targetRole === "secondary_camera"
+    ) {
+      setCurrentView("gate_camera");
+    } else {
+      setCurrentView("live_console");
     }
   };
 
@@ -348,14 +424,37 @@ export default function PaceFrameApp() {
       {/* Top Professional Status Header */}
       <Header
         currentView={currentView}
-        onSelectView={setCurrentView}
+        onSelectView={(view) => {
+          setCurrentView(view);
+          if (view === "live_console" && deviceRole !== "master_console") {
+            handleRoleChange("master_console");
+          } else if (view === "gate_camera" && deviceRole === "master_console") {
+            handleRoleChange("finish_camera");
+          }
+        }}
         sessionId={sessionId}
         deviceRole={deviceRole}
-        onRoleChange={handleRoleChange}
+        onRoleChange={(newRole) => {
+          handleRoleChange(newRole);
+          if (
+            newRole === "finish_camera" ||
+            newRole === "start_camera" ||
+            newRole === "split_camera" ||
+            newRole === "lap_camera"
+          ) {
+            setCurrentView("gate_camera");
+          } else if (newRole === "master_console") {
+            setCurrentView("live_console");
+          }
+        }}
         syncQuality={syncQuality}
         connectionStatus={connectionStatus}
         connectedDevicesCount={connectedDevices.length}
-        onOpenPairing={() => setIsPairingOpen(true)}
+        onOpenScanner={() => setIsQRScannerOpen(true)}
+        onOpenGateQR={() => {
+          setGateModalRole("finish_camera");
+          setIsGateQROpen(true);
+        }}
       />
 
       {/* Main Responsive Screen Viewport */}
@@ -400,18 +499,32 @@ export default function PaceFrameApp() {
             timingEngine={timingEngineRef.current}
             connectedDevices={connectedDevices}
             zones={zones}
-            onUpdateZones={handleUpdateZones}
-            sessionId={sessionId}
-            deviceId={deviceId}
-            deviceName={deviceName}
-            clockOffsetMs={syncQuality.clockOffsetMs}
-            onTimingEventDetected={handleTimingEventDetected}
             onOpenResults={(res) => {
               setActiveResult(res);
               setCurrentView("results");
             }}
-            onOpenStudio={() => setCurrentView("camera_studio")}
+            onOpenGateQR={(role) => {
+              setGateModalRole(role);
+              setIsGateQROpen(true);
+            }}
             onManualTrigger={handleManualTrigger}
+          />
+        )}
+
+        {currentView === "gate_camera" && (
+          <GateCameraView
+            deviceRole={deviceRole}
+            sessionId={sessionId}
+            deviceId={deviceId}
+            deviceName={deviceName}
+            clockOffsetMs={syncQuality.clockOffsetMs}
+            zones={zones}
+            onUpdateZones={handleUpdateZones}
+            onTimingEventDetected={handleTimingEventDetected}
+            onSwitchToConsole={() => {
+              handleRoleChange("master_console");
+              setCurrentView("live_console");
+            }}
           />
         )}
 
@@ -437,7 +550,23 @@ export default function PaceFrameApp() {
         )}
       </main>
 
-      {/* Device Pairing Modal */}
+      {/* Role-Specific Gate QR Modal */}
+      <GateQRModal
+        isOpen={isGateQROpen}
+        onClose={() => setIsGateQROpen(false)}
+        sessionId={sessionId}
+        connectedDevices={connectedDevices}
+        initialRole={gateModalRole}
+      />
+
+      {/* In-App Camera QR Scanner Modal */}
+      <QRScannerModal
+        isOpen={isQRScannerOpen}
+        onClose={() => setIsQRScannerOpen(false)}
+        onScanSuccess={handleScanSuccess}
+      />
+
+      {/* Device Pairing Modal (General) */}
       <PairingModal
         isOpen={isPairingOpen}
         onClose={() => setIsPairingOpen(false)}
