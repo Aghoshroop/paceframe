@@ -18,7 +18,7 @@ import {
   ShieldCheck,
   Pause,
 } from "lucide-react";
-import { DeviceRole, DetectionZone, TimingEvent } from "@/types";
+import { DeviceRole, DetectionZone, TimingEvent, SessionStatus } from "@/types";
 import { CameraManager } from "@/lib/vision/cameraManager";
 import { TorsoTracker } from "@/lib/vision/torsoTracker";
 import { LineCrossingDetector, GateDetectionState } from "@/lib/vision/lineCrossingDetector";
@@ -33,6 +33,8 @@ interface GateCameraViewProps {
   clockOffsetMs: number;
   zones: DetectionZone[];
   resetKey?: number;
+  sessionStatus?: SessionStatus;
+  onStartTimer?: () => void;
   onUpdateZones: (zones: DetectionZone[]) => void;
   onTimingEventDetected: (event: TimingEvent) => void;
   onSwitchToConsole: () => void;
@@ -46,6 +48,8 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
   clockOffsetMs,
   zones,
   resetKey = 0,
+  sessionStatus = "idle",
+  onStartTimer,
   onUpdateZones,
   onTimingEventDetected,
   onSwitchToConsole,
@@ -258,13 +262,21 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
       const gStatus = lineDetector.getGateStatus(zone.zoneId);
       setGateDetectionState(gStatus);
 
+      const isTimerRunning = sessionStatus === "running";
+      const isFinishOrSplit = gateType === "finish" || gateType === "split";
       const isBroken = gStatus === "GATE_BROKEN" || flashBreak || isGateFrozen;
 
       // 2. Draw Virtual Gate Laser Line
       ctx.save();
-      ctx.strokeStyle = isBroken ? "#ffffff" : zone.color || "#ccff00";
-      ctx.lineWidth = isBroken ? 6 : 2.5;
-      ctx.shadowColor = isBroken ? "#ffffff" : zone.color || "#ccff00";
+      const laserColor = isBroken
+        ? "#ffffff"
+        : isFinishOrSplit && !isTimerRunning
+        ? "#facc15"
+        : zone.color || "#ccff00";
+
+      ctx.strokeStyle = laserColor;
+      ctx.lineWidth = isBroken ? 6 : isFinishOrSplit && isTimerRunning ? 3.5 : 2.5;
+      ctx.shadowColor = laserColor;
       ctx.shadowBlur = isBroken ? 25 : 8;
 
       ctx.beginPath();
@@ -273,7 +285,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
       ctx.stroke();
 
       // Top and Bottom Emitter Beacons
-      ctx.fillStyle = isBroken ? "#ffffff" : zone.color || "#ccff00";
+      ctx.fillStyle = laserColor;
       ctx.beginPath();
       ctx.arc(x1, y1 + 12, 7, 0, 2 * Math.PI);
       ctx.arc(x2, y2 - 12, 7, 0, 2 * Math.PI);
@@ -292,19 +304,24 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
           ? "SPLIT GATE"
           : "FINISH GATE";
 
-      const tagText = isBroken
-        ? "LINE BROKEN // RECORDED"
-        : `${gateTitle} ARMED`;
+      let tagText = `${gateTitle} ARMED`;
+      if (isBroken) {
+        tagText = "LINE BROKEN // RECORDED";
+      } else if (isFinishOrSplit && !isTimerRunning) {
+        tagText = `${gateTitle} // WAITING FOR START`;
+      } else if (isFinishOrSplit && isTimerRunning) {
+        tagText = `🔴 ${gateTitle} ARMED // LIVE SPRINT`;
+      }
 
-      const badgeW = Math.max(130, tagText.length * 8);
+      const badgeW = Math.max(140, tagText.length * 8.5);
       ctx.fillStyle = isBroken ? "rgba(255, 255, 255, 0.95)" : "rgba(10, 12, 15, 0.88)";
-      ctx.strokeStyle = zone.color || "#ccff00";
+      ctx.strokeStyle = laserColor;
       ctx.lineWidth = 1;
       ctx.fillRect(midX - badgeW / 2, y1 + 16, badgeW, 26);
       ctx.strokeRect(midX - badgeW / 2, y1 + 16, badgeW, 26);
 
       ctx.font = "bold 11px monospace";
-      ctx.fillStyle = isBroken ? "#0a0c0f" : zone.color || "#ccff00";
+      ctx.fillStyle = isBroken ? "#0a0c0f" : laserColor;
       ctx.textAlign = "center";
       ctx.fillText(tagText, midX, y1 + 33);
       ctx.restore();
@@ -339,7 +356,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
 
         ctx.font = "bold 11px monospace";
         ctx.fillStyle = "#ffffff";
-        ctx.fillText(`SOLID TORSO [${Math.round(torso.confidence * 100)}%]`, tx + 22, ty - 4);
+        ctx.fillText(`SOLID BODY [${Math.round(torso.confidence * 100)}%]`, tx + 22, ty - 4);
         ctx.restore();
 
         // 4. Evaluate Crossing / Penetration of Solid Body
@@ -356,6 +373,24 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
 
         if (crossings.length > 0) {
           for (const c of crossings) {
+            // IF TIMER HAS NOT STARTED YET (for finish or split gate):
+            if (isFinishOrSplit && !isTimerRunning) {
+              // The sprint hasn't started yet!
+              // DO NOT FREEZE THE GATE! DO NOT STOP THE CAMERA!
+              setFlashBreak(true);
+              setTimeout(() => setFlashBreak(false), 500);
+              soundEngine.playSplitBeep();
+              if (typeof window !== "undefined" && "vibrate" in navigator) {
+                try {
+                  navigator.vibrate(40);
+                } catch {}
+              }
+              // Send gate test signal so console knows beam is active
+              onTimingEventDetected(c.event);
+              break;
+            }
+
+            // OFFICIAL SPRINT CROSSING (Timer IS running, or Start Gate):
             setFlashBreak(true);
             setLastBreakEvent({ time: c.interpolatedTimestamp, snapshot: c.frameSnapshot });
 
@@ -378,7 +413,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
         }
       }
     },
-    [cameraManager, torsoTracker, lineDetector, myZone, sessionId, deviceId, deviceName, clockOffsetMs, onTimingEventDetected, flashBreak, isGateFrozen]
+    [cameraManager, torsoTracker, lineDetector, myZone, sessionId, deviceId, deviceName, clockOffsetMs, onTimingEventDetected, flashBreak, isGateFrozen, sessionStatus, gateType]
   );
 
   // Line dragging
@@ -525,9 +560,23 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
               </button>
             </div>
 
-            <div className="rounded-2xl bg-black/80 border border-white/15 px-3 py-1.5 text-[11px] font-mono text-zinc-300 backdrop-blur-md flex items-center gap-1.5">
-              <span className={`h-2 w-2 rounded-full ${isTorsoDetected ? "bg-emerald-400 animate-pulse" : "bg-zinc-500"}`} />
-              <span>{isTorsoDetected ? "Torso Locked" : "Watching Line"}</span>
+            <div className="flex items-center gap-2">
+              {/* Optional Quick Test Sprint Button if user wants to test beam break immediately */}
+              {sessionStatus !== "running" && onStartTimer && (gateType === "finish" || gateType === "split") && (
+                <button
+                  onClick={onStartTimer}
+                  title="Start sprint timer now to test breaking the line"
+                  className="rounded-2xl bg-[#ccff00] hover:bg-[#b8e600] text-black font-black px-3.5 py-2 text-xs uppercase tracking-wider shadow-lg active:scale-95 transition-all flex items-center gap-1.5"
+                >
+                  <Play className="h-3.5 w-3.5 fill-black" />
+                  <span>Test Break</span>
+                </button>
+              )}
+
+              <div className="rounded-2xl bg-black/80 border border-white/15 px-3 py-2 text-[11px] font-mono text-zinc-300 backdrop-blur-md flex items-center gap-1.5">
+                <span className={`h-2 w-2 rounded-full ${isTorsoDetected ? "bg-emerald-400 animate-pulse" : "bg-zinc-500"}`} />
+                <span>{isTorsoDetected ? "Target Locked" : "Watching Line"}</span>
+              </div>
             </div>
           </div>
         )}
@@ -555,6 +604,21 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
               )}
               <span className="uppercase">{myZone.name}</span>
             </div>
+
+            {/* Live Sprint vs Standby Waiting Badge */}
+            {(gateType === "finish" || gateType === "split") && (
+              sessionStatus === "running" ? (
+                <div className="flex items-center gap-1.5 rounded-xl border border-red-500/50 bg-red-500/20 px-2.5 py-1 text-xs font-mono font-bold text-red-400 backdrop-blur-md animate-pulse">
+                  <span className="h-2 w-2 rounded-full bg-red-400" />
+                  <span className="hidden xs:inline">SPRINT LIVE</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-mono font-bold text-amber-300 backdrop-blur-md">
+                  <Clock className="h-3.5 w-3.5 animate-pulse" />
+                  <span className="hidden xs:inline">WAITING FOR START</span>
+                </div>
+              )
+            )}
           </div>
 
           <div className="flex items-center gap-1.5">

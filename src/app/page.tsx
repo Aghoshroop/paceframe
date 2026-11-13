@@ -22,6 +22,7 @@ import {
   ConnectedDevice,
   SyncQuality,
   ConnectionStatus,
+  SessionStatus,
 } from "@/types";
 import { TimingEngine } from "@/lib/timing/timingEngine";
 import { MeshNetworkManager } from "@/lib/network/meshNetwork";
@@ -60,6 +61,7 @@ export default function PaceFrameApp() {
   const [isQRScannerOpen, setIsQRScannerOpen] = useState<boolean>(false);
   const [gateModalRole, setGateModalRole] = useState<DeviceRole>("finish_camera");
   const [resetKey, setResetKey] = useState<number>(0);
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>("idle");
 
   // Active Detection Zones (Line 1, Line 2...)
   const [zones, setZones] = useState<DetectionZone[]>([]);
@@ -200,10 +202,14 @@ export default function PaceFrameApp() {
     timingEngineRef.current = engine;
 
     engine.subscribe({
+      onStatusChange: (s) => {
+        setSessionStatus(s);
+      },
       onResultGenerated: (res) => {
         const updated = StorageDB.saveResult(res);
         setRecentResults(updated);
         setActiveResult(res);
+        setSessionStatus("finished");
         // Keep coach in Live Console so they see the stopped timer and photo-finish freeze frame
       },
     });
@@ -249,15 +255,19 @@ export default function PaceFrameApp() {
       onManualTriggerReceived: (trigger) => {
         if (trigger.type === "ARM") {
           engine.arm();
+          setSessionStatus("armed");
         } else if (trigger.type === "START") {
           engine.manualOverride("START", trigger.timestamp);
+          setSessionStatus("running");
         } else if (trigger.type === "STOP") {
           engine.manualOverride("FINISH", trigger.timestamp);
+          setSessionStatus("finished");
         }
       },
       onSessionReset: () => {
         setResetKey((k) => k + 1);
         engine.reset();
+        setSessionStatus("idle");
         setActiveResult(null);
       },
     });
@@ -292,6 +302,18 @@ export default function PaceFrameApp() {
 
   // Handle manual trigger (Hold & Release or manual override)
   const handleManualTrigger = (type: "ARM" | "START" | "STOP") => {
+    if (timingEngineRef.current) {
+      if (type === "ARM") {
+        timingEngineRef.current.arm();
+        setSessionStatus("armed");
+      } else if (type === "START") {
+        timingEngineRef.current.manualOverride("START", getPreciseTime());
+        setSessionStatus("running");
+      } else if (type === "STOP") {
+        timingEngineRef.current.manualOverride("FINISH", getPreciseTime());
+        setSessionStatus("finished");
+      }
+    }
     if (meshNetworkRef.current) {
       meshNetworkRef.current.emitManualTrigger(type);
     }
@@ -374,6 +396,7 @@ export default function PaceFrameApp() {
   // Broadcast session reset to all gates
   const handleResetSession = () => {
     timingEngineRef.current?.reset();
+    setSessionStatus("idle");
     setActiveResult(null);
     setResetKey((k) => k + 1);
     if (meshNetworkRef.current) {
@@ -545,6 +568,8 @@ export default function PaceFrameApp() {
             clockOffsetMs={syncQuality.clockOffsetMs}
             zones={zones}
             resetKey={resetKey}
+            sessionStatus={sessionStatus}
+            onStartTimer={() => handleManualTrigger("START")}
             onUpdateZones={handleUpdateZones}
             onTimingEventDetected={handleTimingEventDetected}
             onSwitchToConsole={() => {

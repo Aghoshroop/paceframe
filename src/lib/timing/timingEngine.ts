@@ -281,10 +281,12 @@ export class TimingEngine {
     const nowEpoch = getPreciseTime();
     let finishTime = event.synchronizedTimestamp || nowEpoch;
 
-    // If timer was not actively running (e.g. user is testing the beam), create an instant sprint test result
+    // If timer was not actively running, this is an optical beam test or alignment check before sprint start.
+    // Do NOT stop or finish the session, and do NOT generate a fake finished sprint result.
     if (this.status !== "running" || this.startTime === null) {
-      this.startTime = Math.max(0, finishTime - 1350);
       this.listeners.forEach((l) => l.onGateTestTriggered?.(event));
+      soundEngine.playSplitBeep();
+      return null;
     }
 
     let totalTimeMs = finishTime - this.startTime;
