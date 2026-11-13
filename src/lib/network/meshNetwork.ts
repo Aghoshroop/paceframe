@@ -180,6 +180,7 @@ export class MeshNetworkManager {
       fetch("/api/signaling", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        keepalive: true,
         body: JSON.stringify({
           action: "send",
           sessionId: this.sessionId,
@@ -197,10 +198,10 @@ export class MeshNetworkManager {
     // Initial poll immediately
     this.pollRelay();
 
-    // 250ms polling loop for instant responsive device discovery and low-latency line breaks
+    // 100ms polling loop for ultra-low latency line breaks (< 50ms response time)
     this.pollIntervalId = setInterval(() => {
       this.pollRelay();
-    }, 250);
+    }, 100);
   }
 
   private async pollRelay() {

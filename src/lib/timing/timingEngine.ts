@@ -175,15 +175,21 @@ export class TimingEngine {
       return null;
     }
 
-    const elapsedMs = Math.max(0, event.synchronizedTimestamp - this.startTime);
-    const splitTimeMs = Math.max(0, event.synchronizedTimestamp - this.lastSplitTime);
+    const nowEpoch = getPreciseTime();
+    let splitSyncTime = event.synchronizedTimestamp;
+    if (splitSyncTime <= this.lastSplitTime) {
+      splitSyncTime = Math.max(this.lastSplitTime + 50, nowEpoch - 20);
+    }
 
-    // Prevent immediate redundant split triggers (< 300ms)
-    if (splitTimeMs < 300) {
+    const elapsedMs = Math.max(0, splitSyncTime - this.startTime);
+    const splitTimeMs = Math.max(0, splitSyncTime - this.lastSplitTime);
+
+    // Prevent immediate redundant split triggers (< 200ms)
+    if (splitTimeMs < 200) {
       return null;
     }
 
-    this.lastSplitTime = event.synchronizedTimestamp;
+    this.lastSplitTime = splitSyncTime;
     const splitIndex = this.splits.length + 1;
 
     let speedKmh: number | undefined;
@@ -279,14 +285,18 @@ export class TimingEngine {
       return null;
     }
 
-    const totalTimeMs = Math.max(0, event.synchronizedTimestamp - this.startTime);
+    const nowEpoch = getPreciseTime();
+    let finishTime = event.synchronizedTimestamp;
+    let totalTimeMs = finishTime - this.startTime;
 
-    // Safeguard against sub-150ms accidental immediate release triggers
-    if (totalTimeMs < 150) {
-      return null;
+    // Check if clock skew between devices caused an improbable timestamp
+    if (totalTimeMs < 50 || finishTime > nowEpoch + 1500) {
+      // Fallback: Use authoritative Console arrival time minus transit delay (~20ms)
+      finishTime = Math.max(this.startTime + 50, nowEpoch - 20);
+      totalTimeMs = finishTime - this.startTime;
     }
 
-    this.finishTime = event.synchronizedTimestamp;
+    this.finishTime = finishTime;
 
     if (event.frameReference) {
       this.videoEvidence.finishFrame = event.frameReference;

@@ -1,5 +1,5 @@
 // Virtual Timing Line Crossing Detection and Sub-Frame Photo-Finish Engine
-// Implements Dual-Boundary Approach State Machine, Torso Plane Penetration, and Sub-Frame Interpolation
+// Implements Instant Torso Plane Penetration, Robust Boundary Crossing, and Sub-Frame Linear Interpolation
 
 import { DetectionZone, TimingEvent, TimingEventType } from "@/types";
 import { TorsoLandmarkData } from "./torsoTracker";
@@ -18,10 +18,8 @@ export type GateDetectionState =
   | "COOLDOWN";
 
 interface GateStateData {
-  approachSide: "left" | "right" | null;
-  approachFramesCount: number;
-  hasConfirmedApproach: boolean;
   lastTriggerTime: number;
+  lastSide: "left" | "right" | "on_line";
 }
 
 export class LineCrossingDetector {
@@ -53,11 +51,8 @@ export class LineCrossingDetector {
     if (!state) return "WAITING_FOR_APPROACH";
 
     const now = performance.now();
-    if (now - state.lastTriggerTime < 1500) {
+    if (now - state.lastTriggerTime < 1200) {
       return "GATE_BROKEN";
-    }
-    if (state.hasConfirmedApproach) {
-      return "RUNNER_APPROACHING";
     }
     return "WAITING_FOR_APPROACH";
   }
@@ -84,20 +79,17 @@ export class LineCrossingDetector {
     for (const zone of zones) {
       if (!zone.active) continue;
 
-      // Initialize gate state if needed
       let gState = this.gateStates.get(zone.zoneId);
       if (!gState) {
         gState = {
-          approachSide: null,
-          approachFramesCount: 0,
-          hasConfirmedApproach: false,
           lastTriggerTime: 0,
+          lastSide: "left",
         };
         this.gateStates.set(zone.zoneId, gState);
       }
 
-      // Check cooldown lockout (default 1500ms)
-      if (tCurr - gState.lastTriggerTime < (zone.cooldownMs || 1500)) {
+      // Check cooldown lockout (default 1000ms cooldown)
+      if (tCurr - gState.lastTriggerTime < (zone.cooldownMs || 1000)) {
         continue;
       }
 
@@ -113,76 +105,47 @@ export class LineCrossingDetector {
       const currX = pCurr.x;
       const prevX = pPrev.x;
 
-      // Distance from gate line (negative = left, positive = right)
+      // Distance from line (negative = left, positive = right)
       const distCurr = currX - xLine;
       const distPrev = prevX - xLine;
 
-      // 1. Approach State Machine
-      // Athlete must be established on an approach side for at least 2 frames before a crossing can trigger.
-      // This prevents false triggers from someone already standing on the line when timing starts!
-      const approachMargin = 0.015; // 1.5% screen width margin
+      const currentSide: "left" | "right" | "on_line" =
+        distCurr < -0.01 ? "left" : distCurr > 0.01 ? "right" : "on_line";
 
-      if (distCurr < -approachMargin) {
-        // Approaching from left
-        if (gState.approachSide !== "left") {
-          gState.approachSide = "left";
-          gState.approachFramesCount = 1;
-        } else {
-          gState.approachFramesCount++;
-        }
-        if (gState.approachFramesCount >= 2) {
-          gState.hasConfirmedApproach = true;
-        }
-      } else if (distCurr > approachMargin) {
-        // Approaching from right
-        if (gState.approachSide !== "right") {
-          gState.approachSide = "right";
-          gState.approachFramesCount = 1;
-        } else {
-          gState.approachFramesCount++;
-        }
-        if (gState.approachFramesCount >= 2) {
-          gState.hasConfirmedApproach = true;
-        }
-      }
+      // 1. Direct Line Crossing / Penetration Check:
+      // a) Trajectory sign change: was on left, now on right (or vice versa)
+      const crossedLineLeftToRight = prevX <= xLine && currX >= xLine;
+      const crossedLineRightToLeft = prevX >= xLine && currX <= xLine;
 
-      // 2. Torso Line Crossing Evaluation
-      // A crossing requires:
-      // a) Confirmed approach from one side
-      // b) Torso plane crossed over the line (sign change between prev and curr), OR
-      //    Bounding box chest penetration with forward momentum towards the line
+      // b) Torso bounding box penetrates the virtual line while moving
+      const bbLeft = currentTorso.boundingBox.x;
+      const bbRight = currentTorso.boundingBox.x + currentTorso.boundingBox.width;
+      const bbIntersectsLine = bbLeft <= xLine && bbRight >= xLine;
+
+      // c) Side transition from previous frame
+      const sideTransition =
+        (gState.lastSide === "left" && currentSide === "right") ||
+        (gState.lastSide === "right" && currentSide === "left") ||
+        (gState.lastSide !== "on_line" && currentSide === "on_line");
+
       let hasCrossed = false;
-      const vx = currentTorso.velocity.vx;
 
-      if (gState.hasConfirmedApproach) {
-        if (gState.approachSide === "left") {
-          // Moving Left-to-Right across line
-          if (zone.detectionDirection === "left_to_right" || zone.detectionDirection === "bidirectional") {
-            const crossedLine = prevX < xLine && currX >= xLine;
-            const penetratingLine = Math.abs(distCurr) <= 0.03 && vx > 0.04;
-            if (crossedLine || penetratingLine) {
-              hasCrossed = true;
-            }
-          }
-        } else if (gState.approachSide === "right") {
-          // Moving Right-to-Left across line
-          if (zone.detectionDirection === "right_to_left" || zone.detectionDirection === "bidirectional") {
-            const crossedLine = prevX > xLine && currX <= xLine;
-            const penetratingLine = Math.abs(distCurr) <= 0.03 && vx < -0.04;
-            if (crossedLine || penetratingLine) {
-              hasCrossed = true;
-            }
-          }
-        }
+      if (zone.detectionDirection === "left_to_right") {
+        hasCrossed = crossedLineLeftToRight || (bbIntersectsLine && currentTorso.velocity.vx > 0.02);
+      } else if (zone.detectionDirection === "right_to_left") {
+        hasCrossed = crossedLineRightToLeft || (bbIntersectsLine && currentTorso.velocity.vx < -0.02);
       } else {
-        // Fallback for fast entry: If athlete enters frame at high speed crossing the line in 1 frame
-        const trajectoryJump = (prevX < xLine && currX >= xLine) || (prevX > xLine && currX <= xLine);
-        if (trajectoryJump && Math.abs(vx) > 0.20) {
-          hasCrossed = true;
-        }
+        // Bidirectional: any crossing or bounding box penetration
+        hasCrossed =
+          crossedLineLeftToRight ||
+          crossedLineRightToLeft ||
+          sideTransition ||
+          (bbIntersectsLine && Math.abs(currentTorso.velocity.vx) >= 0.01);
       }
 
-      // 3. Trigger Gate Break Event
+      gState.lastSide = currentSide;
+
+      // 2. Trigger Gate Break Event
       if (hasCrossed) {
         // Calculate sub-frame linear interpolation offset
         const totalDeltaX = Math.abs(currX - prevX);
@@ -194,12 +157,10 @@ export class LineCrossingDetector {
         const interpolatedLocalTime = tPrev + alpha * (tCurr - tPrev);
         const synchronizedTimestamp = interpolatedLocalTime + clockOffsetMs;
 
-        // Record trigger time and reset approach state
+        // Record trigger time
         gState.lastTriggerTime = tCurr;
-        gState.hasConfirmedApproach = false;
-        gState.approachFramesCount = 0;
 
-        // Capture official photo-finish evidence snapshot
+        // Capture lightweight photo-finish evidence snapshot (fast 480px JPEG)
         const snapshot = this.captureEvidenceFrame(
           videoElement,
           zone,
@@ -247,7 +208,8 @@ export class LineCrossingDetector {
   }
 
   /**
-   * Generates a high-contrast official photo-finish evidence frame
+   * Generates a lightweight, high-contrast photo-finish evidence frame
+   * Scaled to 480px width so base64 string is only ~12KB for instant network transmission
    */
   private captureEvidenceFrame(
     video: HTMLVideoElement,
@@ -260,25 +222,28 @@ export class LineCrossingDetector {
       return "";
     }
 
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-    this.evidenceCanvas.width = w;
-    this.evidenceCanvas.height = h;
+    // Fast lightweight resolution: 480px width (preserves 16:9 aspect ratio)
+    const targetW = 480;
+    const aspect = video.videoHeight / video.videoWidth || 9 / 16;
+    const targetH = Math.round(targetW * aspect);
 
-    // Draw the raw camera frame
-    this.evidenceCtx.drawImage(video, 0, 0, w, h);
+    this.evidenceCanvas.width = targetW;
+    this.evidenceCanvas.height = targetH;
 
-    const x1 = zone.lineCoordinates.x1 * w;
-    const y1 = zone.lineCoordinates.y1 * h;
-    const x2 = zone.lineCoordinates.x2 * w;
-    const y2 = zone.lineCoordinates.y2 * h;
+    // 1. Draw raw video frame scaled down
+    this.evidenceCtx.drawImage(video, 0, 0, targetW, targetH);
 
-    // Draw razor-sharp neon finish gate laser
+    const x1 = zone.lineCoordinates.x1 * targetW;
+    const y1 = zone.lineCoordinates.y1 * targetH;
+    const x2 = zone.lineCoordinates.x2 * targetW;
+    const y2 = zone.lineCoordinates.y2 * targetH;
+
+    // 2. Draw neon finish laser line
     this.evidenceCtx.save();
     this.evidenceCtx.strokeStyle = "#ffffff";
-    this.evidenceCtx.lineWidth = 6;
+    this.evidenceCtx.lineWidth = 4;
     this.evidenceCtx.shadowColor = zone.color || "#ccff00";
-    this.evidenceCtx.shadowBlur = 20;
+    this.evidenceCtx.shadowBlur = 12;
 
     this.evidenceCtx.beginPath();
     this.evidenceCtx.moveTo(x1, y1);
@@ -286,86 +251,58 @@ export class LineCrossingDetector {
     this.evidenceCtx.stroke();
 
     this.evidenceCtx.strokeStyle = zone.color || "#ccff00";
-    this.evidenceCtx.lineWidth = 3;
+    this.evidenceCtx.lineWidth = 2;
     this.evidenceCtx.stroke();
     this.evidenceCtx.restore();
 
-    // Draw athlete torso target crosshair
-    const tx = torso.torsoCenter.x * w;
-    const ty = torso.torsoCenter.y * h;
+    // 3. Draw torso target reticle
+    const tx = torso.torsoCenter.x * targetW;
+    const ty = torso.torsoCenter.y * targetH;
 
     this.evidenceCtx.save();
-    // Crosshair rings
     this.evidenceCtx.strokeStyle = "#ffffff";
-    this.evidenceCtx.lineWidth = 3;
+    this.evidenceCtx.lineWidth = 2;
     this.evidenceCtx.beginPath();
-    this.evidenceCtx.arc(tx, ty, 20, 0, 2 * Math.PI);
+    this.evidenceCtx.arc(tx, ty, 12, 0, 2 * Math.PI);
     this.evidenceCtx.stroke();
 
     this.evidenceCtx.fillStyle = zone.color || "#ccff00";
     this.evidenceCtx.beginPath();
-    this.evidenceCtx.arc(tx, ty, 7, 0, 2 * Math.PI);
+    this.evidenceCtx.arc(tx, ty, 4, 0, 2 * Math.PI);
     this.evidenceCtx.fill();
 
     // Torso Bounding Box
-    this.evidenceCtx.strokeStyle = "rgba(204, 255, 0, 0.6)";
-    this.evidenceCtx.lineWidth = 2;
-    this.evidenceCtx.setLineDash([6, 6]);
+    this.evidenceCtx.strokeStyle = "rgba(204, 255, 0, 0.7)";
+    this.evidenceCtx.lineWidth = 1.5;
+    this.evidenceCtx.setLineDash([4, 4]);
     this.evidenceCtx.strokeRect(
-      torso.boundingBox.x * w,
-      torso.boundingBox.y * h,
-      torso.boundingBox.width * w,
-      torso.boundingBox.height * h
+      torso.boundingBox.x * targetW,
+      torso.boundingBox.y * targetH,
+      torso.boundingBox.width * targetW,
+      torso.boundingBox.height * targetH
     );
     this.evidenceCtx.restore();
 
-    // Official FAT (Fully Automatic Timing) Telemetry Banner
-    const pad = 16;
-    const boxW = Math.min(w - 32, 380);
-    const boxH = 96;
-
+    // 4. Official FAT Telemetry Overlay Badge
     this.evidenceCtx.save();
-    this.evidenceCtx.fillStyle = "rgba(10, 12, 15, 0.92)";
-    this.evidenceCtx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+    this.evidenceCtx.fillStyle = "rgba(10, 12, 15, 0.90)";
+    this.evidenceCtx.fillRect(8, 8, 220, 46);
+    this.evidenceCtx.strokeStyle = "#ccff00";
     this.evidenceCtx.lineWidth = 1;
-    this.evidenceCtx.fillRect(pad, pad, boxW, boxH);
-    this.evidenceCtx.strokeRect(pad, pad, boxW, boxH);
+    this.evidenceCtx.strokeRect(8, 8, 220, 46);
 
-    // Accent line
-    this.evidenceCtx.fillStyle = zone.color || "#ccff00";
-    this.evidenceCtx.fillRect(pad, pad, boxW, 4);
-
-    this.evidenceCtx.font = "bold 14px -apple-system, sans-serif";
+    this.evidenceCtx.font = "bold 10px monospace";
     this.evidenceCtx.fillStyle = "#ffffff";
-    this.evidenceCtx.fillText(
-      `OFFICIAL PHOTO-FINISH // ${zone.name.toUpperCase()}`,
-      pad + 12,
-      pad + 24
-    );
+    this.evidenceCtx.fillText(`PHOTO-FINISH // ${zone.name.toUpperCase()}`, 14, 22);
 
-    this.evidenceCtx.font = "11px monospace";
     this.evidenceCtx.fillStyle = "#ccff00";
-    this.evidenceCtx.fillText(
-      `SUB-FRAME INTERPOLATION: α = ${(alpha * 100).toFixed(0)}% • SYNC: ${syncTimestamp.toFixed(2)} ms`,
-      pad + 12,
-      pad + 44
-    );
-
-    this.evidenceCtx.fillStyle = "#d4d4d8";
-    this.evidenceCtx.fillText(
-      `TORSO PLANE: [${torso.torsoCenter.x.toFixed(3)}, ${torso.torsoCenter.y.toFixed(3)}] • VELOCITY: ${torso.velocity.vx.toFixed(2)} w/s`,
-      pad + 12,
-      pad + 62
-    );
+    this.evidenceCtx.fillText(`SUB-FRAME α=${(alpha * 100).toFixed(0)}%`, 14, 34);
 
     this.evidenceCtx.fillStyle = "#a1a1aa";
-    this.evidenceCtx.fillText(
-      `VALIDATED BY CAMERA GATE • CONFIDENCE: ${(Math.max(0.85, torso.confidence) * 100).toFixed(0)}%`,
-      pad + 12,
-      pad + 80
-    );
+    this.evidenceCtx.fillText(`TORSO CONF: ${(torso.confidence * 100).toFixed(0)}%`, 14, 46);
     this.evidenceCtx.restore();
 
-    return this.evidenceCanvas.toDataURL("image/jpeg", 0.88);
+    // High compression JPEG (only ~12KB string!)
+    return this.evidenceCanvas.toDataURL("image/jpeg", 0.65);
   }
 }

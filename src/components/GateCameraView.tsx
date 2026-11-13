@@ -75,26 +75,26 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
       ? "split"
       : "finish";
 
-  // Active zone for this gate camera
-  const myZone =
-    zones.find((z) => z.zoneType === gateType) ||
-    zones[0] || {
-      zoneId: `zone_${gateType}_main`,
-      deviceId,
-      zoneType: gateType,
-      name:
-        gateType === "start"
-          ? "Start Gate"
-          : gateType === "split"
-          ? "Flying Split"
-          : "Finish Line",
-      lineCoordinates: { x1: 0.5, y1: 0.05, x2: 0.5, y2: 0.95 },
-      detectionDirection: "bidirectional",
-      confidenceThreshold: 0.6,
-      cooldownMs: 1500,
-      color: gateType === "start" ? "#00f0ff" : gateType === "split" ? "#ff00ea" : "#ccff00",
-      active: true,
-    };
+  // Active zone for this gate camera (strictly enforces current gateType role)
+  const matchedZone = zones.find((z) => z.zoneType === gateType);
+  const myZone: DetectionZone = {
+    ...(matchedZone || zones[0] || {}),
+    zoneId: matchedZone?.zoneId || `zone_${gateType}_main`,
+    deviceId,
+    zoneType: gateType,
+    name:
+      gateType === "start"
+        ? "Start Gate"
+        : gateType === "split"
+        ? "Flying Split Gate"
+        : "Finish Line Gate",
+    lineCoordinates: matchedZone?.lineCoordinates || { x1: 0.5, y1: 0.05, x2: 0.5, y2: 0.95 },
+    detectionDirection: matchedZone?.detectionDirection || "bidirectional",
+    confidenceThreshold: 0.6,
+    cooldownMs: 1000,
+    color: gateType === "start" ? "#00f0ff" : gateType === "split" ? "#ff00ea" : "#ccff00",
+    active: true,
+  };
 
   // Mount camera
   useEffect(() => {

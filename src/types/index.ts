@@ -117,6 +117,7 @@ export interface TimingEvent {
   splitIndex?: number;
   lapNumber?: number;
   detectionZoneId?: string;
+  zoneId?: string;
   torsoPosition?: {
     x: number; // 0.0 - 1.0
     y: number; // 0.0 - 1.0
