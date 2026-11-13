@@ -1,21 +1,34 @@
 // NTP-style High-Resolution Clock Synchronization for Multi-Device Precision
+// Uses global high-precision monotonic epoch timestamps (performance.timeOrigin + performance.now())
 
 import { SyncQuality } from "@/types";
 
+/**
+ * Global high-resolution monotonic epoch timestamp function
+ * Combines performance.timeOrigin with performance.now() to provide sub-millisecond precision
+ * anchored to the real-world Unix epoch across all modern devices.
+ */
+export const getPreciseTime = (): number => {
+  if (typeof performance !== "undefined" && typeof performance.timeOrigin === "number") {
+    return performance.timeOrigin + performance.now();
+  }
+  return Date.now();
+};
+
 export interface ClockSample {
-  t1: number; // Client send
-  t2: number; // Authority receive
-  t3: number; // Authority send
-  t4: number; // Client receive
+  t1: number; // Client send (epoch ms)
+  t2: number; // Authority receive (epoch ms)
+  t3: number; // Authority send (epoch ms)
+  t4: number; // Client receive (epoch ms)
   rtt: number;
   offset: number;
 }
 
 export class ClockSyncManager {
   private samples: ClockSample[] = [];
-  private maxSamples: number = 12;
+  private maxSamples: number = 15;
   private currentOffset: number = 0;
-  private currentJitter: number = 0;
+  private currentJitter: number = 0.5;
   private currentRtt: number = 0;
 
   // For host/authority device, offset is 0
@@ -44,7 +57,7 @@ export class ClockSyncManager {
    */
   public createPingPayload(): { t1: number } {
     return {
-      t1: performance.now(),
+      t1: getPreciseTime(),
     };
   }
 
@@ -52,8 +65,8 @@ export class ClockSyncManager {
    * Called by Authority when ping arrives: returns t1, t2, and sends t3
    */
   public handlePingAtAuthority(t1: number): { t1: number; t2: number; t3: number } {
-    const t2 = performance.now();
-    const t3 = performance.now();
+    const t2 = getPreciseTime();
+    const t3 = getPreciseTime();
     return { t1, t2, t3 };
   }
 
@@ -65,7 +78,7 @@ export class ClockSyncManager {
       return this.getQuality();
     }
 
-    const t4 = performance.now();
+    const t4 = getPreciseTime();
     const rtt = Math.max(0, (t4 - t1) - (t3 - t2));
     const offset = ((t2 - t1) + (t3 - t4)) / 2;
 
@@ -82,7 +95,7 @@ export class ClockSyncManager {
   private recalculate() {
     if (this.samples.length === 0) return;
 
-    // Filter out outlier RTTs (keep samples with RTT below 1.5 * minRTT or top 70% lowest RTT)
+    // Filter out outlier RTTs (keep top 70% lowest RTT)
     const sortedByRtt = [...this.samples].sort((a, b) => a.rtt - b.rtt);
     const bestSamples = sortedByRtt.slice(0, Math.max(2, Math.ceil(this.samples.length * 0.7)));
 
@@ -91,7 +104,7 @@ export class ClockSyncManager {
     let weightedOffsetSum = 0;
 
     for (const s of bestSamples) {
-      const weight = 1 / Math.max(0.1, s.rtt);
+      const weight = 1 / Math.max(0.5, s.rtt);
       weightedOffsetSum += s.offset * weight;
       totalWeight += weight;
     }
@@ -106,20 +119,20 @@ export class ClockSyncManager {
         (bestSamples.length - 1);
       this.currentJitter = Math.sqrt(variance);
     } else {
-      this.currentJitter = 1.0;
+      this.currentJitter = 0.5;
     }
   }
 
   /**
-   * Convert local device performance.now() to authoritative session timestamp
+   * Convert local device getPreciseTime() to authoritative session timestamp
    */
-  public toSynchronizedTime(localPerfNow: number = performance.now()): number {
-    if (this.isAuthority) return localPerfNow;
-    return localPerfNow + this.currentOffset;
+  public toSynchronizedTime(localEpochMs: number = getPreciseTime()): number {
+    if (this.isAuthority) return localEpochMs;
+    return localEpochMs + this.currentOffset;
   }
 
   /**
-   * Convert an authoritative session timestamp to local device performance.now()
+   * Convert an authoritative session timestamp to local device epoch timestamp
    */
   public toLocalTime(syncTime: number): number {
     if (this.isAuthority) return syncTime;
@@ -138,10 +151,10 @@ export class ClockSyncManager {
     }
 
     let quality: SyncQuality["quality"] = "uncalibrated";
-    if (this.samples.length >= 3) {
-      if (this.currentRtt < 15 && this.currentJitter < 3.0) {
+    if (this.samples.length >= 2) {
+      if (this.currentRtt < 30 && this.currentJitter < 4.0) {
         quality = "excellent";
-      } else if (this.currentRtt < 40 && this.currentJitter < 8.0) {
+      } else if (this.currentRtt < 80 && this.currentJitter < 10.0) {
         quality = "good";
       } else {
         quality = "fair";
@@ -160,8 +173,7 @@ export class ClockSyncManager {
   public reset() {
     this.samples = [];
     this.currentOffset = 0;
-    this.currentJitter = 0;
+    this.currentJitter = 0.5;
     this.currentRtt = 0;
   }
 }
-

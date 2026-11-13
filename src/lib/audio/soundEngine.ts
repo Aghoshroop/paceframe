@@ -21,6 +21,10 @@ class SoundEngine {
     this.isMuted = muted;
   }
 
+  public playStartHorn() {
+    this.playGunshot();
+  }
+
   // Realistic synthetic starter gun sound:
   // Combines a high-impact white noise burst with an initial sharp impulse and low sub-transient
   public playGunshot() {

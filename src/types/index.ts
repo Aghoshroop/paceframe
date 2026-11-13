@@ -128,6 +128,7 @@ export interface TimingEvent {
 
 export interface SplitRecord {
   index: number;
+  splitIndex?: number;
   name: string;
   splitTimeMs: number; // time since previous split or start
   elapsedMs: number; // cumulative time from start

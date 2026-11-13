@@ -26,6 +26,7 @@ import {
 import { TimingEngine } from "@/lib/timing/timingEngine";
 import { MeshNetworkManager } from "@/lib/network/meshNetwork";
 import { StorageDB } from "@/lib/storage/db";
+import { getPreciseTime } from "@/lib/timing/clockSync";
 
 export default function PaceFrameApp() {
   // Navigation View State - default to live_console for instant readiness
@@ -306,9 +307,11 @@ export default function PaceFrameApp() {
   };
 
   // Join a new session ID
-  const handleJoinSession = (newSessionId: string) => {
-    setSessionId(newSessionId);
-    const updated = { ...session, sessionId: newSessionId };
+  const handleJoinSession = (newSessionId: string, roleToJoin: DeviceRole = deviceRole) => {
+    const cleanSessionId = newSessionId.trim().toUpperCase();
+    setSessionId(cleanSessionId);
+    setDeviceRole(roleToJoin);
+    const updated = { ...session, sessionId: cleanSessionId };
     setSession(updated);
 
     if (timingEngineRef.current) {
@@ -318,12 +321,12 @@ export default function PaceFrameApp() {
 
     if (meshNetworkRef.current) {
       meshNetworkRef.current.destroy();
-      const isAuthority = deviceRole === "master_console";
+      const isAuthority = roleToJoin === "master_console";
       const mesh = new MeshNetworkManager(
-        newSessionId,
+        cleanSessionId,
         deviceId,
         deviceName,
-        deviceRole,
+        roleToJoin,
         isAuthority
       );
       meshNetworkRef.current = mesh;
@@ -360,10 +363,8 @@ export default function PaceFrameApp() {
   // Handle scan success from in-app QR scanner
   const handleScanSuccess = (scannedSessionId: string, scannedRole?: string) => {
     setIsQRScannerOpen(false);
-    handleJoinSession(scannedSessionId);
-
     const targetRole: DeviceRole = (scannedRole as DeviceRole) || "finish_camera";
-    handleRoleChange(targetRole);
+    handleJoinSession(scannedSessionId, targetRole);
 
     if (
       targetRole === "finish_camera" ||
@@ -381,7 +382,7 @@ export default function PaceFrameApp() {
   // Clock sync trigger
   const handleTriggerClockSync = () => {
     if (meshNetworkRef.current) {
-      meshNetworkRef.current.broadcastMessage("CLOCK_PING", { t1: performance.now() });
+      meshNetworkRef.current.broadcastMessage("CLOCK_PING", { t1: getPreciseTime() });
     }
   };
 
@@ -499,6 +500,7 @@ export default function PaceFrameApp() {
             timingEngine={timingEngineRef.current}
             connectedDevices={connectedDevices}
             zones={zones}
+            deviceId={deviceId}
             onOpenResults={(res) => {
               setActiveResult(res);
               setCurrentView("results");
@@ -508,6 +510,7 @@ export default function PaceFrameApp() {
               setIsGateQROpen(true);
             }}
             onManualTrigger={handleManualTrigger}
+            onAssignDeviceRole={handleAssignRemoteRole}
           />
         )}
 

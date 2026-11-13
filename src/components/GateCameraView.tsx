@@ -19,6 +19,7 @@ import { CameraManager } from "@/lib/vision/cameraManager";
 import { TorsoTracker, TorsoLandmarkData } from "@/lib/vision/torsoTracker";
 import { LineCrossingDetector, GateDetectionState } from "@/lib/vision/lineCrossingDetector";
 import { soundEngine } from "@/lib/audio/soundEngine";
+import { getPreciseTime } from "@/lib/timing/clockSync";
 
 interface GateCameraViewProps {
   deviceRole: DeviceRole;
@@ -132,7 +133,8 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
       );
       setIsCameraActive(true);
 
-      cameraManager.startFrameLoop((video, frameTime) => {
+      cameraManager.startFrameLoop((video) => {
+        const frameTime = getPreciseTime();
         processFrame(video, frameTime);
       });
     } catch (err: any) {

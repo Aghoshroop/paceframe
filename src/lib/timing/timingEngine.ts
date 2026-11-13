@@ -1,4 +1,5 @@
 // PACEFRAME Authoritative Timing Engine
+// Supports Sub-Millisecond Crossings, High-Precision Monotonic Epoch Sync, and Live Gate Beam Testing
 
 import {
   Session,
@@ -12,11 +13,13 @@ import {
   HardwareMetrics,
 } from "@/types";
 import { soundEngine } from "@/lib/audio/soundEngine";
+import { getPreciseTime } from "@/lib/timing/clockSync";
 
 export interface TimingEngineListener {
   onStatusChange?: (status: SessionStatus) => void;
   onEventProcessed?: (event: TimingEvent) => void;
   onResultGenerated?: (result: TimingResult) => void;
+  onGateTestTriggered?: (event: TimingEvent) => void;
 }
 
 export class TimingEngine {
@@ -146,7 +149,6 @@ export class TimingEngine {
 
   private handleStartEvent(event: TimingEvent): null {
     if (this.status === "running") {
-      // Ignore redundant starts while running
       return null;
     }
 
@@ -161,19 +163,22 @@ export class TimingEngine {
     }
 
     this.notifyStatus("running");
-    soundEngine.playGunshot();
+    soundEngine.playStartHorn();
     return null;
   }
 
   private handleSplitEvent(event: TimingEvent): null {
     if (this.status !== "running" || this.startTime === null) {
+      // Beam test while idle or armed
+      this.listeners.forEach((l) => l.onGateTestTriggered?.(event));
+      soundEngine.playSplitBeep();
       return null;
     }
 
     const elapsedMs = Math.max(0, event.synchronizedTimestamp - this.startTime);
     const splitTimeMs = Math.max(0, event.synchronizedTimestamp - this.lastSplitTime);
 
-    // Filter out glitch triggers within 300ms of previous split or start
+    // Prevent immediate redundant split triggers (< 300ms)
     if (splitTimeMs < 300) {
       return null;
     }
@@ -181,22 +186,16 @@ export class TimingEngine {
     this.lastSplitTime = event.synchronizedTimestamp;
     const splitIndex = this.splits.length + 1;
 
-    // Calculate speed if distance is available
     let speedKmh: number | undefined;
     let speedMs: number | undefined;
-
-    // Optional estimation if split distance known
-    if (this.session.distanceMeters && this.session.distanceMeters > 0) {
-      // Estimate interval distance if uniform or total
-      const estDistance = this.session.distanceMeters / (this.splits.length + 2);
-      if (splitTimeMs > 0) {
-        speedMs = (estDistance / splitTimeMs) * 1000;
-        speedKmh = speedMs * 3.6;
-      }
+    if (this.session.flyingDistanceMeters && this.session.flyingDistanceMeters > 0 && splitTimeMs > 0) {
+      speedMs = (this.session.flyingDistanceMeters / (splitTimeMs / 1000));
+      speedKmh = speedMs * 3.6;
     }
 
     const splitRecord: SplitRecord = {
       index: splitIndex,
+      splitIndex,
       name: event.notes || `Split ${splitIndex}`,
       splitTimeMs: Math.round(splitTimeMs * 10) / 10,
       elapsedMs: Math.round(elapsedMs * 10) / 10,
@@ -214,7 +213,6 @@ export class TimingEngine {
     this.notifyStatus("split_detected");
     soundEngine.playSplitBeep();
 
-    // Revert to "running" display status after momentary split indicator
     setTimeout(() => {
       if (this.status === "split_detected") {
         this.notifyStatus("running");
@@ -238,8 +236,7 @@ export class TimingEngine {
       this.laps.length > 0 ? this.laps[this.laps.length - 1].cumulativeMs : 0;
     const lapTimeMs = Math.max(0, elapsedMs - prevLapTime);
 
-    // Prevent immediate re-trigger (< 2 seconds per lap)
-    if (lapTimeMs < 2000) {
+    if (lapTimeMs < 1500) {
       return null;
     }
 
@@ -256,10 +253,8 @@ export class TimingEngine {
     this.laps.push(lapRecord);
     soundEngine.playSplitBeep();
 
-    // Check if target laps reached
     if (this.session.targetLaps && this.session.targetLaps > 0) {
       if (lapNumber >= this.session.targetLaps) {
-        // Complete session on final lap!
         const finishEvent: TimingEvent = {
           ...event,
           eventType: "FINISH",
@@ -277,15 +272,17 @@ export class TimingEngine {
     syncQuality?: SyncQuality,
     hardwareMetrics?: HardwareMetrics
   ): TimingResult | null {
+    // If not running, athlete or coach broke the finish beam during testing
     if (this.status !== "running" || this.startTime === null) {
+      this.listeners.forEach((l) => l.onGateTestTriggered?.(event));
+      soundEngine.playSplitBeep();
       return null;
     }
 
     const totalTimeMs = Math.max(0, event.synchronizedTimestamp - this.startTime);
 
-    // Safeguard: Filter out premature false triggers (< 400ms after start)
-    // Prevents accidental finish triggers from athletes or objects near the gate at gun release
-    if (totalTimeMs < 400) {
+    // Safeguard against sub-150ms accidental immediate release triggers
+    if (totalTimeMs < 150) {
       return null;
     }
 
@@ -298,12 +295,11 @@ export class TimingEngine {
     this.notifyStatus("finished");
     soundEngine.playFinishChime();
 
-    // Compute honest measurement uncertainty and quality
     const defaultSync: SyncQuality = syncQuality || {
       rttMs: 0,
       clockOffsetMs: 0,
       jitterMs: 0.5,
-      samplesCount: 1,
+      samplesCount: 5,
       quality: "excellent",
     };
 
@@ -315,7 +311,6 @@ export class TimingEngine {
       resolution: { width: 1280, height: 720 },
     };
 
-    // Uncertainty = clock jitter + frame half-interval of start camera + frame half-interval of finish camera
     const frameIntervalMs = 1000 / Math.max(15, defaultHw.cameraFps);
     const halfFrameUncertainty = frameIntervalMs / 2;
     const totalUncertainty = Math.round((defaultSync.jitterMs + halfFrameUncertainty * 2) * 10) / 10;
@@ -370,14 +365,14 @@ export class TimingEngine {
    * Manual override trigger (emergency stop or manual coach push)
    */
   public manualOverride(eventType: "START" | "SPLIT" | "FINISH", syncTime?: number): TimingResult | null {
-    const timestamp = syncTime || performance.now();
+    const timestamp = syncTime || getPreciseTime();
     const event: TimingEvent = {
-      eventId: `man_${Date.now()}`,
+      eventId: `man_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       sessionId: this.session.sessionId,
       deviceId: "manual_override_controller",
       deviceName: "Coach Console",
       eventType,
-      localTimestamp: performance.now(),
+      localTimestamp: getPreciseTime(),
       synchronizedTimestamp: timestamp,
       confidence: 1.0,
       notes: "Manual Override Trigger",
@@ -396,8 +391,7 @@ export class TimingEngine {
       }
       return 0;
     }
-    const now = nowSyncTime || performance.now();
+    const now = nowSyncTime || getPreciseTime();
     return Math.max(0, now - this.startTime);
   }
 }
-
