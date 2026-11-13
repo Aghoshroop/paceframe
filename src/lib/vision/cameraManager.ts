@@ -50,42 +50,42 @@ export class CameraManager {
     this.videoElement = videoElement;
     this.stopCamera();
 
+    // Check mediaDevices support
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error(
+        "Camera access is not supported or blocked in this browser. Please make sure camera permissions are enabled, or use localhost/HTTPS."
+      );
+    }
+
+    // Flexible constraints with ideal hints (never 'min' or 'exact' to avoid OverconstrainedError)
     const constraints: MediaStreamConstraints = {
       audio: false,
       video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
+        deviceId: deviceId ? { ideal: deviceId } : undefined,
         facingMode: deviceId ? undefined : { ideal: preferredFacing },
-        width: { ideal: 1920, min: 640 },
-        height: { ideal: 1080, min: 480 },
-        frameRate: { ideal: 60, min: 30 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 60 },
       },
     };
 
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
       this.videoElement.srcObject = this.mediaStream;
+      this.videoElement.setAttribute("playsinline", "true");
+      this.videoElement.setAttribute("webkit-playsinline", "true");
       this.videoElement.playsInline = true;
       this.videoElement.muted = true;
+      this.videoElement.autoplay = true;
 
-      await new Promise<void>((resolve) => {
-        if (!this.videoElement) return resolve();
-        let resolved = false;
-        const finish = () => {
-          if (resolved) return;
-          resolved = true;
-          this.videoElement?.play().then(() => resolve()).catch(() => resolve());
-        };
+      // Play immediately while user gesture is active
+      try {
+        await this.videoElement.play();
+      } catch (pErr) {
+        console.warn("video.play() warning:", pErr);
+      }
 
-        if (this.videoElement.readyState >= 1) {
-          finish();
-          return;
-        }
-
-        this.videoElement.onloadedmetadata = finish;
-        setTimeout(finish, 1500);
-      });
-
-      // Update available devices list after permission granted
+      // Re-enumerate cameras now that permission has been granted
       await this.getAvailableCameras();
 
       // Retrieve actual track settings
@@ -99,31 +99,39 @@ export class CameraManager {
 
       return this.mediaStream;
     } catch (err: any) {
-      // Fallback 1: Try with preferred facing mode without strict resolution/fps constraints
+      // Fallback 1: Preferred facing mode without resolution/fps hints
       try {
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: preferredFacing } },
           audio: false,
         });
         this.videoElement.srcObject = this.mediaStream;
+        this.videoElement.setAttribute("playsinline", "true");
+        this.videoElement.setAttribute("webkit-playsinline", "true");
         this.videoElement.playsInline = true;
         this.videoElement.muted = true;
+        this.videoElement.autoplay = true;
         await this.videoElement.play().catch(() => {});
         return this.mediaStream;
       } catch {
-        // Fallback 2: Basic video constraint
+        // Fallback 2: Generic video stream
         try {
           this.mediaStream = await navigator.mediaDevices.getUserMedia({
             video: true,
             audio: false,
           });
           this.videoElement.srcObject = this.mediaStream;
+          this.videoElement.setAttribute("playsinline", "true");
+          this.videoElement.setAttribute("webkit-playsinline", "true");
           this.videoElement.playsInline = true;
           this.videoElement.muted = true;
+          this.videoElement.autoplay = true;
           await this.videoElement.play().catch(() => {});
           return this.mediaStream;
         } catch (fallbackErr: any) {
-          throw new Error(`Camera access denied or unavailable: ${fallbackErr?.message || err?.message || err}`);
+          throw new Error(
+            `Camera access denied or unavailable: ${fallbackErr?.message || err?.message || err}`
+          );
         }
       }
     }
@@ -137,11 +145,6 @@ export class CameraManager {
     this.processCount = 0;
     this.droppedFrames = 0;
 
-    const useRvfc =
-      this.videoElement &&
-      "requestVideoFrameCallback" in this.videoElement &&
-      typeof (this.videoElement as any).requestVideoFrameCallback === "function";
-
     const loop = (now: number, metadata?: any) => {
       if (!this.isMonitoring || !this.videoElement) return;
 
@@ -154,15 +157,16 @@ export class CameraManager {
         this.lastFrameTimestamp > 0 &&
         deltaSinceLastFrame > this.expectedFrameIntervalMs * 1.8
       ) {
-        // Probable dropped frame
         this.droppedFrames += Math.round(deltaSinceLastFrame / this.expectedFrameIntervalMs) - 1;
       }
       this.lastFrameTimestamp = frameTime;
 
-      // Execute vision frame processing
-      const startProc = performance.now();
+      // Execute vision frame processing as soon as video has metadata or dimensions
       try {
-        if (this.onFrame && this.videoElement.readyState >= 2) {
+        if (
+          this.onFrame &&
+          (this.videoElement.readyState >= 1 || this.videoElement.videoWidth > 0)
+        ) {
           this.onFrame(this.videoElement, frameTime, metadata);
           this.processCount++;
         }
@@ -180,19 +184,11 @@ export class CameraManager {
         this.lastFpsUpdateTime = now;
       }
 
-      // Request next frame
-      if (useRvfc) {
-        this.frameCallbackId = (this.videoElement as any).requestVideoFrameCallback(loop);
-      } else {
-        this.frameCallbackId = requestAnimationFrame(loop);
-      }
+      // Robust requestAnimationFrame loop (unbreakable by Chrome devtools or backgrounding)
+      this.frameCallbackId = requestAnimationFrame(loop);
     };
 
-    if (useRvfc) {
-      this.frameCallbackId = (this.videoElement as any).requestVideoFrameCallback(loop);
-    } else {
-      this.frameCallbackId = requestAnimationFrame(loop);
-    }
+    this.frameCallbackId = requestAnimationFrame(loop);
   }
 
   public stopFrameLoop() {

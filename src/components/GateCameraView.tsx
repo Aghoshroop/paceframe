@@ -59,12 +59,14 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
 
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>("");
+  const [userSelectedCamera, setUserSelectedCamera] = useState<boolean>(false);
 
   // Camera activation state: DO NOT auto-turn on! Wait for user tap
   const [isCameraStarted, setIsCameraStarted] = useState<boolean>(false);
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [isStarting, setIsStarting] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isInsecureOrigin, setIsInsecureOrigin] = useState<boolean>(false);
 
   // Optical Tracking Telemetry
   const [isTorsoDetected, setIsTorsoDetected] = useState<boolean>(false);
@@ -111,6 +113,15 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
   useEffect(() => {
     let mounted = true;
 
+    if (typeof window !== "undefined") {
+      const isLocal =
+        window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1";
+      if (!isLocal && !window.isSecureContext) {
+        setIsInsecureOrigin(true);
+      }
+    }
+
     cameraManager.getAvailableCameras().then((devices) => {
       if (!mounted) return;
       setAvailableCameras(devices);
@@ -151,7 +162,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
     }
 
     try {
-      const activeCamId = camId || selectedCameraId || undefined;
+      const activeCamId = camId || (userSelectedCamera ? selectedCameraId : undefined);
       await cameraManager.startCamera(
         videoEl,
         "environment",
@@ -208,6 +219,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
     const nextIndex = (currentIndex + 1) % availableCameras.length;
     const nextCam = availableCameras[nextIndex];
     setSelectedCameraId(nextCam.deviceId);
+    setUserSelectedCamera(true);
     if (isCameraActive) {
       startCamera(nextCam.deviceId);
     }
@@ -631,7 +643,10 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
                 </label>
                 <select
                   value={selectedCameraId}
-                  onChange={(e) => setSelectedCameraId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedCameraId(e.target.value);
+                    setUserSelectedCamera(true);
+                  }}
                   className="w-full rounded-xl bg-zinc-900 border border-white/15 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#ccff00]"
                 >
                   {availableCameras.map((c, i) => (
@@ -640,6 +655,19 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
                     </option>
                   ))}
                 </select>
+              </div>
+            )}
+
+            {isInsecureOrigin && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-950/40 p-3 text-xs text-amber-300 font-mono text-left space-y-1">
+                <div className="flex items-center gap-1.5 font-bold text-amber-200">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  <span>Camera Requires Secure Origin (HTTPS)</span>
+                </div>
+                <p className="text-[11px] text-amber-300/80 font-sans leading-tight">
+                  Mobile browsers block camera access on local HTTP Wi-Fi. In Chrome on your phone, open{" "}
+                  <code className="bg-black/40 px-1 py-0.5 rounded text-[10px]">chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>, enable this IP, or test on localhost.
+                </p>
               </div>
             )}
 
