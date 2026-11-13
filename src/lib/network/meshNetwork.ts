@@ -18,6 +18,7 @@ export interface MeshNetworkCallbacks {
   onSyncQualityUpdate?: (quality: SyncQuality) => void;
   onConnectionStatusChange?: (status: ConnectionStatus) => void;
   onManualTriggerReceived?: (trigger: { type: "ARM" | "START" | "STOP"; timestamp: number }) => void;
+  onSessionReset?: () => void;
 }
 
 export class MeshNetworkManager {
@@ -490,7 +491,19 @@ export class MeshNetworkManager {
         }
         break;
       }
+
+      case "RESET_SESSION": {
+        this.callbacks.onSessionReset?.();
+        break;
+      }
     }
+  }
+
+  /**
+   * Broadcast session reset to all gate sensors and remotes
+   */
+  public broadcastResetSession() {
+    this.broadcastMessage("RESET_SESSION", { sessionId: this.sessionId });
   }
 
   /**

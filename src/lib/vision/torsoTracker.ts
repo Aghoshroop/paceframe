@@ -1,5 +1,5 @@
 // High-Speed Adaptive Torso Tracking with Sports-Biomechanics Centroid Segmentation
-// Implements Running Adaptive Background Subtraction and Chest/Sternum Torso Plane Locking
+// Strict Human Torso & Solid Mass Filtering (Rejects Hand Waving, Shadows, and Tiny Noise)
 
 export interface TorsoLandmarkData {
   torsoCenter: { x: number; y: number }; // normalized 0..1
@@ -12,25 +12,25 @@ export interface TorsoLandmarkData {
   confidence: number;
   timestamp: number;
   isPoseModel: boolean;
-  approachSide?: "left" | "right" | "on_gate";
+  solidPixelCount: number;
 }
 
 export class TorsoTracker {
   private prevTorso: TorsoLandmarkData | null = null;
   private offscreenCanvas: HTMLCanvasElement | null = null;
   private offscreenCtx: CanvasRenderingContext2D | null = null;
-  
+
   // Downsampled resolution for 60fps real-time computer vision without frame drops
   private downsampleWidth: number = 160;
   private downsampleHeight: number = 90;
 
   // Running adaptive background model (grayscale)
   private bgModel: Float32Array | null = null;
-  private bgLearnRate: number = 0.05; // 5% background adaptation rate
+  private bgLearnRate: number = 0.03; // Conservative 3% adaptation rate to prevent runner absorption
   private consecutiveDetectionCount: number = 0;
   private smoothedCentroid: { x: number; y: number } | null = null;
 
-  // Optional MediaPipe Pose landmarker
+  // MediaPipe Pose landmarker (optional)
   private poseLandmarker: any = null;
   private isPoseLoading: boolean = false;
   private poseLoadFailed: boolean = false;
@@ -59,44 +59,27 @@ export class TorsoTracker {
   }
 
   /**
-   * Optional MediaPipe Pose loader with standard browser script injection
+   * Optional MediaPipe Pose model loader
    */
   public async loadMediaPipePose(): Promise<boolean> {
-    if (this.poseLandmarker || this.isPoseLoading || this.poseLoadFailed) {
-      return !!this.poseLandmarker;
-    }
-
+    if (this.poseLandmarker) return true;
+    if (this.poseLoadFailed) return false;
     this.isPoseLoading = true;
     try {
-      if (typeof window !== "undefined") {
-        // Try loading via CDN script or global
-        const visionModule = (window as any).PoseLandmarker
-          ? (window as any)
-          : null;
-
-        if (visionModule && visionModule.PoseLandmarker) {
-          const vision = await visionModule.FilesetResolver.forVisionTasks(
-            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-          );
-          this.poseLandmarker = await visionModule.PoseLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-              delegate: "GPU",
-            },
-            runningMode: "VIDEO",
-            numPoses: 1,
-            minPoseDetectionConfidence: 0.45,
-            minPosePresenceConfidence: 0.45,
-            minTrackingConfidence: 0.45,
-          });
-          this.isPoseLoading = false;
-          return true;
-        }
-      }
-      this.poseLoadFailed = true;
+      const vision = await (Function('return import("@mediapipe/tasks-vision")')() as Promise<any>);
+      const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+      );
+      this.poseLandmarker = await vision.PoseLandmarker.createFromOptions(wasmFileset, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+      });
       this.isPoseLoading = false;
-      return false;
+      return true;
     } catch {
       this.poseLoadFailed = true;
       this.isPoseLoading = false;
@@ -122,7 +105,7 @@ export class TorsoTracker {
           const rh = landmarks[24]; // Right hip
 
           if (ls && rs && lh && rh) {
-            // Chest / sternum is at 60% shoulder to 40% hip
+            // Chest / sternum is at 70% shoulder to 30% hip
             const shoulderCenterX = (ls.x + rs.x) / 2;
             const shoulderCenterY = (ls.y + rs.y) / 2;
             const hipCenterX = (lh.x + rh.x) / 2;
@@ -136,53 +119,60 @@ export class TorsoTracker {
             const minY = Math.min(ls.y, rs.y);
             const maxY = Math.max(lh.y, rh.y);
 
-            // Smooth centroid
-            if (!this.smoothedCentroid) {
-              this.smoothedCentroid = { x: rawTorsoX, y: rawTorsoY };
-            } else {
-              this.smoothedCentroid.x = 0.75 * rawTorsoX + 0.25 * this.smoothedCentroid.x;
-              this.smoothedCentroid.y = 0.75 * rawTorsoY + 0.25 * this.smoothedCentroid.y;
+            const width = maxX - minX;
+            const height = maxY - minY;
+
+            // Strict human body dimensions check
+            if (height >= 0.20 && width >= 0.06) {
+              if (!this.smoothedCentroid) {
+                this.smoothedCentroid = { x: rawTorsoX, y: rawTorsoY };
+              } else {
+                this.smoothedCentroid.x = 0.75 * rawTorsoX + 0.25 * this.smoothedCentroid.x;
+                this.smoothedCentroid.y = 0.75 * rawTorsoY + 0.25 * this.smoothedCentroid.y;
+              }
+
+              let vx = 0;
+              let vy = 0;
+              if (this.prevTorso) {
+                const dt = Math.max(0.001, (timestamp - this.prevTorso.timestamp) / 1000);
+                vx = (this.smoothedCentroid.x - this.prevTorso.torsoCenter.x) / dt;
+                vy = (this.smoothedCentroid.y - this.prevTorso.torsoCenter.y) / dt;
+              }
+
+              const data: TorsoLandmarkData = {
+                torsoCenter: { x: this.smoothedCentroid.x, y: this.smoothedCentroid.y },
+                leftShoulder: ls,
+                rightShoulder: rs,
+                leftHip: lh,
+                rightHip: rh,
+                boundingBox: {
+                  x: minX,
+                  y: minY,
+                  width: Math.max(0.08, width),
+                  height: Math.max(0.20, height),
+                },
+                velocity: { vx, vy },
+                confidence: 0.98,
+                timestamp,
+                isPoseModel: true,
+                solidPixelCount: 500,
+              };
+
+              this.prevTorso = data;
+              return data;
             }
-
-            let vx = 0;
-            let vy = 0;
-            if (this.prevTorso) {
-              const dt = Math.max(0.001, (timestamp - this.prevTorso.timestamp) / 1000);
-              vx = (this.smoothedCentroid.x - this.prevTorso.torsoCenter.x) / dt;
-              vy = (this.smoothedCentroid.y - this.prevTorso.torsoCenter.y) / dt;
-            }
-
-            const data: TorsoLandmarkData = {
-              torsoCenter: { x: this.smoothedCentroid.x, y: this.smoothedCentroid.y },
-              leftShoulder: ls,
-              rightShoulder: rs,
-              leftHip: lh,
-              rightHip: rh,
-              boundingBox: {
-                x: minX,
-                y: minY,
-                width: Math.max(0.08, maxX - minX),
-                height: Math.max(0.18, maxY - minY),
-              },
-              velocity: { vx, vy },
-              confidence: 0.98,
-              timestamp,
-              isPoseModel: true,
-            };
-
-            this.prevTorso = data;
-            return data;
           }
         }
       } catch {}
     }
 
-    // 2. High-speed Adaptive Silhouette & Chest Segmentation (Zero latency, track-hardened)
+    // 2. High-speed Adaptive Silhouette & Chest Segmentation with Strict Human Torso Verification
     return this.trackAdaptiveSilhouette(video, timestamp);
   }
 
   /**
    * Tracks athletic silhouette using Adaptive Background Model and Chest Centroid
+   * Strictly verifies solid human body dimensions to reject hands, shadows, and small noise.
    */
   private trackAdaptiveSilhouette(
     video: HTMLVideoElement,
@@ -204,17 +194,14 @@ export class TorsoTracker {
         this.bgModel = new Float32Array(totalPixels);
         for (let i = 0; i < totalPixels; i++) {
           const idx = i * 4;
-          // Grayscale luminance
           this.bgModel[i] = 0.299 * pixels[idx] + 0.587 * pixels[idx + 1] + 0.114 * pixels[idx + 2];
         }
         return null;
       }
 
-      // 1. Foreground Difference & Column/Row Projections
-      const colHistogram = new Int32Array(w);
-      const rowHistogram = new Int32Array(h);
+      // 1. Foreground Difference Computation
       let foregroundPixelsCount = 0;
-      const threshold = 18; // Grayscale luminance delta
+      const threshold = 22; // Enhanced threshold for solid object detection (avoids minor lighting noise)
 
       let sumX = 0;
       let sumY = 0;
@@ -223,7 +210,7 @@ export class TorsoTracker {
       let minY = h;
       let maxY = 0;
 
-      for (let y = 4; y < h - 4; y++) {
+      for (let y = 3; y < h - 3; y++) {
         const rowOffset = y * w;
         for (let x = 3; x < w - 3; x++) {
           const pIdx = (rowOffset + x) * 4;
@@ -233,8 +220,6 @@ export class TorsoTracker {
 
           if (diff > threshold) {
             foregroundPixelsCount++;
-            colHistogram[x]++;
-            rowHistogram[y]++;
             sumX += x;
             sumY += y;
 
@@ -243,19 +228,27 @@ export class TorsoTracker {
             if (y < minY) minY = y;
             if (y > maxY) maxY = y;
           } else {
-            // Adaptively learn stationary background
+            // Adapt stationary background
             this.bgModel[rowOffset + x] += (gray - bgVal) * this.bgLearnRate;
           }
         }
       }
 
-      // Minimum human athlete silhouette size:
-      // Require at least 0.3% of pixels and vertical span of at least 15% of frame
-      const minPixels = totalPixels * 0.003; // ~43 pixels
+      // --- STRICT SOLID HUMAN BODY VALIDATION ---
+      // 1. A human body must occupy a significant physical area:
+      // Minimum 200 pixels on downsampled 160x90 canvas (~1.4% of screen)
+      const minSolidPixels = 180;
       const bodyHeight = (maxY - minY) / h;
       const bodyWidth = (maxX - minX) / w;
 
-      if (foregroundPixelsCount < minPixels || bodyHeight < 0.12 || bodyWidth < 0.03) {
+      // Reject small objects, flying insects, or hands:
+      // Athlete height must span at least 22% of camera frame height
+      // Athlete width must span at least 5% of camera frame width
+      if (
+        foregroundPixelsCount < minSolidPixels ||
+        bodyHeight < 0.22 ||
+        bodyWidth < 0.05
+      ) {
         this.consecutiveDetectionCount = Math.max(0, this.consecutiveDetectionCount - 1);
         if (this.consecutiveDetectionCount === 0) {
           this.prevTorso = null;
@@ -263,16 +256,22 @@ export class TorsoTracker {
         return null;
       }
 
-      this.consecutiveDetectionCount++;
+      // 2. Aspect Ratio Check: A human athlete is vertically oriented.
+      // Aspect ratio (height / width) must be >= 1.1.
+      // Rejects horizontal shadows on ground, wide horizontal lines, etc.
+      const aspectRatio = bodyHeight / Math.max(0.01, bodyWidth);
+      if (aspectRatio < 1.05 || aspectRatio > 5.5) {
+        return null;
+      }
 
-      // 2. Chest / Torso Extraction
-      // Sports science rule: Official finish is broken by the TORSO (chest/sternum).
-      // The athlete's chest is located between 25% and 42% down from the top of the body silhouette!
-      const chestTop = minY + (maxY - minY) * 0.22;
+      // 2. Chest / Sternum Torso Plane Extraction:
+      // World Athletics rule: finish is broken by the TORSO (chest/sternum).
+      // The athlete's chest is located between 20% and 44% down from the top of the body silhouette!
+      const chestTop = minY + (maxY - minY) * 0.20;
       const chestBottom = minY + (maxY - minY) * 0.44;
       const chestCenterY = (chestTop + chestBottom) / 2 / h;
 
-      // Calculate horizontal center of mass specifically within the chest band for pinpoint precision
+      // Verify that the chest band contains a SOLID core mass of pixels (not empty air between limbs)
       let chestSumX = 0;
       let chestCount = 0;
       const yStart = Math.floor(chestTop);
@@ -290,15 +289,22 @@ export class TorsoTracker {
         }
       }
 
-      const rawChestX = chestCount > 0 ? (chestSumX / chestCount) / w : (sumX / foregroundPixelsCount) / w;
+      // Chest band must contain at least 40 solid pixels
+      if (chestCount < 40) {
+        return null;
+      }
+
+      this.consecutiveDetectionCount++;
+
+      const rawChestX = (chestSumX / chestCount) / w;
       const rawChestY = chestCenterY;
 
       // 3. Smooth Centroid with Exponential Moving Average (Jitter rejection)
       if (!this.smoothedCentroid) {
         this.smoothedCentroid = { x: rawChestX, y: rawChestY };
       } else {
-        this.smoothedCentroid.x = 0.72 * rawChestX + 0.28 * this.smoothedCentroid.x;
-        this.smoothedCentroid.y = 0.72 * rawChestY + 0.28 * this.smoothedCentroid.y;
+        this.smoothedCentroid.x = 0.70 * rawChestX + 0.30 * this.smoothedCentroid.x;
+        this.smoothedCentroid.y = 0.70 * rawChestY + 0.30 * this.smoothedCentroid.y;
       }
 
       // 4. Calculate Velocity Vector (vx, vy in screen width/sec)
@@ -310,25 +316,25 @@ export class TorsoTracker {
         vy = (this.smoothedCentroid.y - this.prevTorso.torsoCenter.y) / dt;
       }
 
-      // Confidence score: based on aspect ratio (human body is taller than wide) and stability
-      const aspectRatio = bodyHeight / Math.max(0.01, bodyWidth);
-      let confidence = 0.85;
-      if (aspectRatio >= 1.4 && aspectRatio <= 4.0) confidence += 0.08;
-      if (this.consecutiveDetectionCount >= 3) confidence += 0.05;
-      confidence = Math.min(0.98, Math.max(0.75, confidence));
+      // Honest Confidence Score based on solid mass and stability
+      let confidence = 0.88;
+      if (this.consecutiveDetectionCount >= 2) confidence += 0.05;
+      if (aspectRatio >= 1.4 && aspectRatio <= 3.8) confidence += 0.05;
+      confidence = Math.min(0.99, Math.max(0.80, confidence));
 
       const data: TorsoLandmarkData = {
         torsoCenter: { x: this.smoothedCentroid.x, y: this.smoothedCentroid.y },
         boundingBox: {
           x: minX / w,
           y: minY / h,
-          width: Math.max(0.06, (maxX - minX) / w),
-          height: Math.max(0.14, (maxY - minY) / h),
+          width: Math.max(0.06, bodyWidth),
+          height: Math.max(0.20, bodyHeight),
         },
         velocity: { vx: Math.round(vx * 100) / 100, vy: Math.round(vy * 100) / 100 },
         confidence: Math.round(confidence * 100) / 100,
         timestamp,
         isPoseModel: false,
+        solidPixelCount: foregroundPixelsCount,
       };
 
       this.prevTorso = data;

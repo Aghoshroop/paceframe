@@ -204,7 +204,8 @@ export type NetworkMessageType =
   | "TIMING_EVENT"
   | "SESSION_UPDATE"
   | "HEARTBEAT"
-  | "MANUAL_TRIGGER";
+  | "MANUAL_TRIGGER"
+  | "RESET_SESSION";
 
 export interface NetworkMessage {
   id: string;

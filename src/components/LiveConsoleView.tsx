@@ -43,6 +43,7 @@ interface LiveConsoleViewProps {
   onOpenGateQR: (role: DeviceRole) => void;
   onManualTrigger: (type: "ARM" | "START" | "STOP") => void;
   onAssignDeviceRole?: (targetDeviceId: string, newRole: DeviceRole) => void;
+  onResetSession?: () => void;
 }
 
 export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
@@ -54,6 +55,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
   onOpenGateQR,
   onManualTrigger,
   onAssignDeviceRole,
+  onResetSession,
 }) => {
   // Timing engine reactive states
   const [status, setStatus] = useState<SessionStatus>(timingEngine.getStatus());
@@ -228,11 +230,12 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
     triggerHaptic(80);
   };
 
-  // 4. Reset & Arm for Next Sprint
+  // 4. Reset & Arm for Next Sprint (Signals all gate cameras to unfreeze and re-arm)
   const handleResetForNextSprint = () => {
     timingEngine.reset();
     setCurrentResult(null);
     setShowPhotoModal(false);
+    onResetSession?.();
     triggerHaptic(40);
   };
 

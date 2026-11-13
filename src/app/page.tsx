@@ -59,6 +59,7 @@ export default function PaceFrameApp() {
   const [isGateQROpen, setIsGateQROpen] = useState<boolean>(false);
   const [isQRScannerOpen, setIsQRScannerOpen] = useState<boolean>(false);
   const [gateModalRole, setGateModalRole] = useState<DeviceRole>("finish_camera");
+  const [resetKey, setResetKey] = useState<number>(0);
 
   // Active Detection Zones (Line 1, Line 2...)
   const [zones, setZones] = useState<DetectionZone[]>([]);
@@ -254,6 +255,11 @@ export default function PaceFrameApp() {
           engine.manualOverride("FINISH", trigger.timestamp);
         }
       },
+      onSessionReset: () => {
+        setResetKey((k) => k + 1);
+        engine.reset();
+        setActiveResult(null);
+      },
     });
 
     return () => {
@@ -356,7 +362,22 @@ export default function PaceFrameApp() {
             timingEngineRef.current?.manualOverride("FINISH", trigger.timestamp);
           }
         },
+        onSessionReset: () => {
+          setResetKey((k) => k + 1);
+          timingEngineRef.current?.reset();
+          setActiveResult(null);
+        },
       });
+    }
+  };
+
+  // Broadcast session reset to all gates
+  const handleResetSession = () => {
+    timingEngineRef.current?.reset();
+    setActiveResult(null);
+    setResetKey((k) => k + 1);
+    if (meshNetworkRef.current) {
+      meshNetworkRef.current.broadcastResetSession();
     }
   };
 
@@ -511,6 +532,7 @@ export default function PaceFrameApp() {
             }}
             onManualTrigger={handleManualTrigger}
             onAssignDeviceRole={handleAssignRemoteRole}
+            onResetSession={handleResetSession}
           />
         )}
 
@@ -522,6 +544,7 @@ export default function PaceFrameApp() {
             deviceName={deviceName}
             clockOffsetMs={syncQuality.clockOffsetMs}
             zones={zones}
+            resetKey={resetKey}
             onUpdateZones={handleUpdateZones}
             onTimingEventDetected={handleTimingEventDetected}
             onSwitchToConsole={() => {
@@ -536,7 +559,7 @@ export default function PaceFrameApp() {
             result={activeResult}
             onBackToConsole={() => setCurrentView("live_console")}
             onNewAttempt={() => {
-              timingEngineRef.current?.reset();
+              handleResetSession();
               setCurrentView("live_console");
             }}
           />
