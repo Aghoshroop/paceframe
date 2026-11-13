@@ -63,6 +63,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
   // Camera activation state: DO NOT auto-turn on! Wait for user tap
   const [isCameraStarted, setIsCameraStarted] = useState<boolean>(false);
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [isStarting, setIsStarting] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
 
   // Optical Tracking Telemetry
@@ -139,13 +140,22 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
 
   // Start the physical camera stream
   const startCamera = async (camId?: string) => {
-    if (!videoRef.current) return;
+    setIsStarting(true);
     setCameraError(null);
+
+    const videoEl = videoRef.current;
+    if (!videoEl) {
+      setCameraError("Camera video element not available. Please tap again.");
+      setIsStarting(false);
+      return;
+    }
+
     try {
+      const activeCamId = camId || selectedCameraId || undefined;
       await cameraManager.startCamera(
-        videoRef.current,
+        videoEl,
         "environment",
-        camId || selectedCameraId
+        activeCamId
       );
       setIsCameraActive(true);
       setIsCameraStarted(true);
@@ -158,8 +168,13 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
         processFrame(video, frameTime);
       });
     } catch (err: any) {
-      setCameraError(err?.message || "Camera access required for optical gate");
+      console.error("Camera activation error:", err);
+      setCameraError(
+        err?.message || "Camera access required. Please allow camera permissions in your browser."
+      );
       setIsCameraActive(false);
+    } finally {
+      setIsStarting(false);
     }
   };
 
@@ -410,160 +425,16 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
     onUpdateZones(updated);
   };
 
-  // --- SCREEN 1: DEDICATED GATE STANDBY SCREEN (Camera Not Started Yet) ---
-  if (!isCameraStarted) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-[#090a0d] text-white p-4 sm:p-6 select-none relative overflow-y-auto">
-        {/* Top Mini Bar */}
-        <div className="absolute top-4 left-4 right-4 flex items-center justify-between">
-          <button
-            onClick={onSwitchToConsole}
-            className="flex items-center gap-1.5 rounded-xl border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-bold text-zinc-300 hover:text-white active:scale-95 transition-all"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            <span>Switch to Console</span>
-          </button>
-
-          <div className="flex items-center gap-1.5 rounded-xl border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-mono text-zinc-300">
-            <Wifi className="h-3.5 w-3.5 text-[#ccff00]" />
-            <span>SESSION {sessionId}</span>
-          </div>
-        </div>
-
-        {/* Center Standby Card */}
-        <div className="w-full max-w-md rounded-3xl border border-white/15 bg-zinc-950 p-6 sm:p-8 shadow-2xl flex flex-col items-center text-center space-y-4 sm:space-y-6 my-auto">
-          {/* Gate Role Icon */}
-          <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl bg-[#ccff00]/15 border border-[#ccff00]/40 text-[#ccff00] shadow-[0_0_30px_rgba(204,255,0,0.2)]">
-            {gateType === "start" ? (
-              <Zap className="h-10 w-10" />
-            ) : gateType === "split" ? (
-              <Clock className="h-10 w-10" />
-            ) : (
-              <Flag className="h-10 w-10" />
-            )}
-          </div>
-
-          <div>
-            <div className="inline-flex items-center gap-1 rounded-full border border-[#ccff00]/40 bg-[#ccff00]/10 px-3 py-0.5 text-xs font-mono font-bold text-[#ccff00] mb-2 uppercase">
-              Dedicated Gate Sensor Mode
-            </div>
-            <h2 className="text-xl sm:text-2xl font-black uppercase tracking-wider text-white">
-              {gateType === "start"
-                ? "Start Gate Sensor"
-                : gateType === "split"
-                ? "Flying Split Sensor"
-                : "Finish Line Gate Sensor"}
-            </h2>
-            <p className="text-xs text-zinc-400 mt-1 max-w-sm font-sans">
-              Position this phone on a tripod facing the track line. Only a solid human body crossing the laser beam will trigger timing.
-            </p>
-          </div>
-
-          {/* Camera Selection */}
-          {availableCameras.length > 1 && (
-            <div className="w-full text-left space-y-1">
-              <label className="text-[10px] font-mono uppercase text-zinc-400">
-                Select Camera Sensor:
-              </label>
-              <select
-                value={selectedCameraId}
-                onChange={(e) => setSelectedCameraId(e.target.value)}
-                className="w-full rounded-xl bg-zinc-900 border border-white/15 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#ccff00]"
-              >
-                {availableCameras.map((c, i) => (
-                  <option key={c.deviceId} value={c.deviceId}>
-                    {c.label || `Camera ${i + 1}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {cameraError && (
-            <div className="rounded-xl border border-red-500/40 bg-red-950/40 p-3 text-xs text-red-300 font-mono flex items-center gap-2">
-              <AlertCircle className="h-4 w-4 flex-shrink-0" />
-              <span>{cameraError}</span>
-            </div>
-          )}
-
-          {/* Big Prominent Activation Button */}
-          <button
-            onClick={() => startCamera()}
-            className="w-full py-4 sm:py-5 rounded-2xl bg-[#ccff00] hover:bg-[#b8e600] text-black font-black text-sm sm:text-base tracking-wider uppercase shadow-[0_0_30px_rgba(204,255,0,0.35)] active:scale-95 transition-all flex items-center justify-center gap-2"
-          >
-            <Camera className="h-5 w-5" />
-            <span>Turn On Gate Camera</span>
-          </button>
-
-          <div className="text-[11px] font-mono text-zinc-500">
-            Console Device: <strong className="text-zinc-300">Ready to receive breaks</strong>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // --- SCREEN 2: ACTIVE OPTICAL GATE SENSOR VIEW ---
+  // --- MAIN UNIFIED RENDER ---
   return (
     <div className="flex-1 flex flex-col h-full bg-black select-none overflow-hidden relative">
-      {/* Top Sensor HUD Bar */}
-      <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between p-3.5 bg-gradient-to-b from-black/90 via-black/50 to-transparent">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onSwitchToConsole}
-            className="flex items-center gap-1 rounded-xl border border-white/15 bg-zinc-900/80 px-2.5 py-1 text-xs font-bold text-zinc-300 hover:text-white backdrop-blur-md active:scale-95 transition-all"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Console
-          </button>
-
-          <div className="flex items-center gap-1.5 rounded-xl border border-[#ccff00]/40 bg-[#ccff00]/10 px-2.5 py-1 text-xs font-mono font-bold text-[#ccff00] backdrop-blur-md">
-            {gateType === "start" ? (
-              <Zap className="h-3.5 w-3.5" />
-            ) : gateType === "split" ? (
-              <Clock className="h-3.5 w-3.5" />
-            ) : (
-              <Flag className="h-3.5 w-3.5" />
-            )}
-            <span className="uppercase">{myZone.name}</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          {/* Pause / Standby Button */}
-          <button
-            onClick={stopCameraStream}
-            title="Pause camera sensor"
-            className="flex items-center gap-1 rounded-xl border border-white/15 bg-zinc-900/80 px-2.5 py-1 text-xs font-mono text-zinc-300 backdrop-blur-md active:scale-95 transition-all"
-          >
-            <Pause className="h-3.5 w-3.5" />
-            <span className="hidden xs:inline">Standby</span>
-          </button>
-
-          {/* Flip Camera */}
-          {availableCameras.length > 1 && (
-            <button
-              onClick={flipCamera}
-              className="rounded-xl border border-white/15 bg-zinc-900/80 p-1.5 text-zinc-300 backdrop-blur-md active:scale-95 transition-all"
-            >
-              <SwitchCamera className="h-4 w-4" />
-            </button>
-          )}
-
-          {/* Sync Status Pill */}
-          <div className="flex items-center gap-1 rounded-xl border border-white/15 bg-zinc-900/80 px-2.5 py-1 text-[11px] font-mono text-zinc-300 backdrop-blur-md">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>SYNC ±{Math.abs(clockOffsetMs).toFixed(1)}ms</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Full-Screen Viewfinder */}
+      {/* 1. Underlying Viewfinder & Canvas (ALWAYS mounted so videoRef.current is ready immediately) */}
       <div className="relative flex-1 w-full h-full overflow-hidden bg-black flex items-center justify-center">
         <video
           ref={videoRef}
           playsInline
           muted
+          autoPlay
           className="absolute inset-0 h-full w-full object-cover"
         />
 
@@ -625,7 +496,7 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
         )}
 
         {/* Live Line Adjustment Controls at bottom */}
-        {!isGateFrozen && (
+        {isCameraStarted && !isGateFrozen && (
           <div className="absolute bottom-6 left-4 right-4 z-20 flex items-center justify-between pointer-events-auto">
             <div className="flex items-center gap-1.5 rounded-2xl bg-black/80 border border-white/15 p-1.5 backdrop-blur-md">
               <button
@@ -649,6 +520,152 @@ export const GateCameraView: React.FC<GateCameraViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Top Sensor HUD Bar (Active when camera is running) */}
+      {isCameraStarted && (
+        <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between p-3.5 bg-gradient-to-b from-black/90 via-black/50 to-transparent">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onSwitchToConsole}
+              className="flex items-center gap-1 rounded-xl border border-white/15 bg-zinc-900/80 px-2.5 py-1 text-xs font-bold text-zinc-300 hover:text-white backdrop-blur-md active:scale-95 transition-all"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Console
+            </button>
+
+            <div className="flex items-center gap-1.5 rounded-xl border border-[#ccff00]/40 bg-[#ccff00]/10 px-2.5 py-1 text-xs font-mono font-bold text-[#ccff00] backdrop-blur-md">
+              {gateType === "start" ? (
+                <Zap className="h-3.5 w-3.5" />
+              ) : gateType === "split" ? (
+                <Clock className="h-3.5 w-3.5" />
+              ) : (
+                <Flag className="h-3.5 w-3.5" />
+              )}
+              <span className="uppercase">{myZone.name}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {/* Pause / Standby Button */}
+            <button
+              onClick={stopCameraStream}
+              title="Pause camera sensor"
+              className="flex items-center gap-1 rounded-xl border border-white/15 bg-zinc-900/80 px-2.5 py-1 text-xs font-mono text-zinc-300 backdrop-blur-md active:scale-95 transition-all"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              <span className="hidden xs:inline">Standby</span>
+            </button>
+
+            {/* Flip Camera */}
+            {availableCameras.length > 1 && (
+              <button
+                onClick={flipCamera}
+                className="rounded-xl border border-white/15 bg-zinc-900/80 p-1.5 text-zinc-300 backdrop-blur-md active:scale-95 transition-all"
+              >
+                <SwitchCamera className="h-4 w-4" />
+              </button>
+            )}
+
+            {/* Sync Status Pill */}
+            <div className="flex items-center gap-1 rounded-xl border border-white/15 bg-zinc-900/80 px-2.5 py-1 text-[11px] font-mono text-zinc-300 backdrop-blur-md">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>SYNC ±{Math.abs(clockOffsetMs).toFixed(1)}ms</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. DEDICATED GATE STANDBY SCREEN OVERLAY (Shown when camera is not started yet) */}
+      {!isCameraStarted && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#090a0d] text-white p-4 sm:p-6 select-none overflow-y-auto">
+          {/* Top Mini Bar */}
+          <div className="absolute top-4 left-4 right-4 flex items-center justify-between">
+            <button
+              onClick={onSwitchToConsole}
+              className="flex items-center gap-1.5 rounded-xl border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-bold text-zinc-300 hover:text-white active:scale-95 transition-all"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              <span>Switch to Console</span>
+            </button>
+
+            <div className="flex items-center gap-1.5 rounded-xl border border-white/15 bg-zinc-900 px-3 py-1.5 text-xs font-mono text-zinc-300">
+              <Wifi className="h-3.5 w-3.5 text-[#ccff00]" />
+              <span>SESSION {sessionId}</span>
+            </div>
+          </div>
+
+          {/* Center Standby Card */}
+          <div className="w-full max-w-md rounded-3xl border border-white/15 bg-zinc-950 p-6 sm:p-8 shadow-2xl flex flex-col items-center text-center space-y-4 sm:space-y-6 my-auto">
+            {/* Gate Role Icon */}
+            <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl bg-[#ccff00]/15 border border-[#ccff00]/40 text-[#ccff00] shadow-[0_0_30px_rgba(204,255,0,0.2)]">
+              {gateType === "start" ? (
+                <Zap className="h-10 w-10" />
+              ) : gateType === "split" ? (
+                <Clock className="h-10 w-10" />
+              ) : (
+                <Flag className="h-10 w-10" />
+              )}
+            </div>
+
+            <div>
+              <div className="inline-flex items-center gap-1 rounded-full border border-[#ccff00]/40 bg-[#ccff00]/10 px-3 py-0.5 text-xs font-mono font-bold text-[#ccff00] mb-2 uppercase">
+                Dedicated Gate Sensor Mode
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black uppercase tracking-wider text-white">
+                {gateType === "start"
+                  ? "Start Gate Sensor"
+                  : gateType === "split"
+                  ? "Flying Split Sensor"
+                  : "Finish Line Gate Sensor"}
+              </h2>
+              <p className="text-xs text-zinc-400 mt-1 max-w-sm font-sans">
+                Position this phone on a tripod facing the track line. Only a solid human body crossing the laser beam will trigger timing.
+              </p>
+            </div>
+
+            {/* Camera Selection */}
+            {availableCameras.length > 1 && (
+              <div className="w-full text-left space-y-1">
+                <label className="text-[10px] font-mono uppercase text-zinc-400">
+                  Select Camera Sensor:
+                </label>
+                <select
+                  value={selectedCameraId}
+                  onChange={(e) => setSelectedCameraId(e.target.value)}
+                  className="w-full rounded-xl bg-zinc-900 border border-white/15 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#ccff00]"
+                >
+                  {availableCameras.map((c, i) => (
+                    <option key={c.deviceId} value={c.deviceId}>
+                      {c.label || `Camera ${i + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {cameraError && (
+              <div className="rounded-xl border border-red-500/40 bg-red-950/40 p-3 text-xs text-red-300 font-mono flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                <span>{cameraError}</span>
+              </div>
+            )}
+
+            {/* Big Prominent Activation Button */}
+            <button
+              onClick={() => startCamera()}
+              disabled={isStarting}
+              className="w-full py-4 sm:py-5 rounded-2xl bg-[#ccff00] hover:bg-[#b8e600] text-black font-black text-sm sm:text-base tracking-wider uppercase shadow-[0_0_30px_rgba(204,255,0,0.35)] active:scale-95 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+            >
+              <Camera className="h-5 w-5" />
+              <span>{isStarting ? "Starting Camera Sensor..." : "Turn On Gate Camera"}</span>
+            </button>
+
+            <div className="text-[11px] font-mono text-zinc-500">
+              Console Device: <strong className="text-zinc-300">Ready to receive breaks</strong>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

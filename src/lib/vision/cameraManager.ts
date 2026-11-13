@@ -69,9 +69,20 @@ export class CameraManager {
 
       await new Promise<void>((resolve) => {
         if (!this.videoElement) return resolve();
-        this.videoElement.onloadedmetadata = () => {
+        let resolved = false;
+        const finish = () => {
+          if (resolved) return;
+          resolved = true;
           this.videoElement?.play().then(() => resolve()).catch(() => resolve());
         };
+
+        if (this.videoElement.readyState >= 1) {
+          finish();
+          return;
+        }
+
+        this.videoElement.onloadedmetadata = finish;
+        setTimeout(finish, 1500);
       });
 
       // Update available devices list after permission granted
@@ -88,17 +99,32 @@ export class CameraManager {
 
       return this.mediaStream;
     } catch (err: any) {
-      // Fallback to basic video constraint if ideal fails
+      // Fallback 1: Try with preferred facing mode without strict resolution/fps constraints
       try {
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: { facingMode: { ideal: preferredFacing } },
           audio: false,
         });
         this.videoElement.srcObject = this.mediaStream;
-        await this.videoElement.play();
+        this.videoElement.playsInline = true;
+        this.videoElement.muted = true;
+        await this.videoElement.play().catch(() => {});
         return this.mediaStream;
-      } catch (fallbackErr) {
-        throw new Error(`Camera access denied or unavailable: ${err?.message || err}`);
+      } catch {
+        // Fallback 2: Basic video constraint
+        try {
+          this.mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+          this.videoElement.srcObject = this.mediaStream;
+          this.videoElement.playsInline = true;
+          this.videoElement.muted = true;
+          await this.videoElement.play().catch(() => {});
+          return this.mediaStream;
+        } catch (fallbackErr: any) {
+          throw new Error(`Camera access denied or unavailable: ${fallbackErr?.message || err?.message || err}`);
+        }
       }
     }
   }
