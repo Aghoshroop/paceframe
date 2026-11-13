@@ -131,16 +131,16 @@ export class LineCrossingDetector {
       let hasCrossed = false;
 
       if (zone.detectionDirection === "left_to_right") {
-        hasCrossed = crossedLineLeftToRight || (bbIntersectsLine && currentTorso.velocity.vx > 0.02);
+        hasCrossed = crossedLineLeftToRight || (bbIntersectsLine && currentTorso.velocity.vx >= 0);
       } else if (zone.detectionDirection === "right_to_left") {
-        hasCrossed = crossedLineRightToLeft || (bbIntersectsLine && currentTorso.velocity.vx < -0.02);
+        hasCrossed = crossedLineRightToLeft || (bbIntersectsLine && currentTorso.velocity.vx <= 0);
       } else {
-        // Bidirectional: any crossing or bounding box penetration
+        // Bidirectional: any crossing, side transition, or solid object laser line intersection
         hasCrossed =
           crossedLineLeftToRight ||
           crossedLineRightToLeft ||
           sideTransition ||
-          (bbIntersectsLine && Math.abs(currentTorso.velocity.vx) >= 0.01);
+          bbIntersectsLine;
       }
 
       gState.lastSide = currentSide;

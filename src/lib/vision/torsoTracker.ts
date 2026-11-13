@@ -234,20 +234,16 @@ export class TorsoTracker {
         }
       }
 
-      // --- STRICT SOLID HUMAN BODY VALIDATION ---
-      // 1. A human body must occupy a significant physical area:
-      // Minimum 200 pixels on downsampled 160x90 canvas (~1.4% of screen)
-      const minSolidPixels = 180;
-      const bodyHeight = (maxY - minY) / h;
-      const bodyWidth = (maxX - minX) / w;
+      // --- SOLID OBJECT VERIFICATION (Tracks Torso, Body, Leg, or Hand for instant testing) ---
+      // Minimum solid mass: 25 pixels on downsampled 160x90 canvas (filters out compression noise/dust)
+      // Minimum dimension: at least 4% frame dimension
+      const minSolidPixels = 25;
+      const objHeight = (maxY - minY) / h;
+      const objWidth = (maxX - minX) / w;
 
-      // Reject small objects, flying insects, or hands:
-      // Athlete height must span at least 22% of camera frame height
-      // Athlete width must span at least 5% of camera frame width
       if (
         foregroundPixelsCount < minSolidPixels ||
-        bodyHeight < 0.22 ||
-        bodyWidth < 0.05
+        (objHeight < 0.04 && objWidth < 0.04)
       ) {
         this.consecutiveDetectionCount = Math.max(0, this.consecutiveDetectionCount - 1);
         if (this.consecutiveDetectionCount === 0) {
@@ -256,58 +252,21 @@ export class TorsoTracker {
         return null;
       }
 
-      // 2. Aspect Ratio Check: A human athlete is vertically oriented.
-      // Aspect ratio (height / width) must be >= 1.1.
-      // Rejects horizontal shadows on ground, wide horizontal lines, etc.
-      const aspectRatio = bodyHeight / Math.max(0.01, bodyWidth);
-      if (aspectRatio < 1.05 || aspectRatio > 5.5) {
-        return null;
-      }
-
-      // 2. Chest / Sternum Torso Plane Extraction:
-      // World Athletics rule: finish is broken by the TORSO (chest/sternum).
-      // The athlete's chest is located between 20% and 44% down from the top of the body silhouette!
-      const chestTop = minY + (maxY - minY) * 0.20;
-      const chestBottom = minY + (maxY - minY) * 0.44;
-      const chestCenterY = (chestTop + chestBottom) / 2 / h;
-
-      // Verify that the chest band contains a SOLID core mass of pixels (not empty air between limbs)
-      let chestSumX = 0;
-      let chestCount = 0;
-      const yStart = Math.floor(chestTop);
-      const yEnd = Math.ceil(chestBottom);
-
-      for (let y = yStart; y <= yEnd; y++) {
-        const rowOffset = y * w;
-        for (let x = minX; x <= maxX; x++) {
-          const pIdx = (rowOffset + x) * 4;
-          const gray = 0.299 * pixels[pIdx] + 0.587 * pixels[pIdx + 1] + 0.114 * pixels[pIdx + 2];
-          if (Math.abs(gray - this.bgModel[rowOffset + x]) > threshold) {
-            chestSumX += x;
-            chestCount++;
-          }
-        }
-      }
-
-      // Chest band must contain at least 40 solid pixels
-      if (chestCount < 40) {
-        return null;
-      }
-
       this.consecutiveDetectionCount++;
 
-      const rawChestX = (chestSumX / chestCount) / w;
-      const rawChestY = chestCenterY;
+      // Centroid calculated directly from solid mass
+      const rawCentroidX = (sumX / foregroundPixelsCount) / w;
+      const rawCentroidY = (sumY / foregroundPixelsCount) / h;
 
-      // 3. Smooth Centroid with Exponential Moving Average (Jitter rejection)
+      // Smooth Centroid with Exponential Moving Average (Jitter rejection)
       if (!this.smoothedCentroid) {
-        this.smoothedCentroid = { x: rawChestX, y: rawChestY };
+        this.smoothedCentroid = { x: rawCentroidX, y: rawCentroidY };
       } else {
-        this.smoothedCentroid.x = 0.70 * rawChestX + 0.30 * this.smoothedCentroid.x;
-        this.smoothedCentroid.y = 0.70 * rawChestY + 0.30 * this.smoothedCentroid.y;
+        this.smoothedCentroid.x = 0.70 * rawCentroidX + 0.30 * this.smoothedCentroid.x;
+        this.smoothedCentroid.y = 0.70 * rawCentroidY + 0.30 * this.smoothedCentroid.y;
       }
 
-      // 4. Calculate Velocity Vector (vx, vy in screen width/sec)
+      // Calculate Velocity Vector (vx, vy in screen width/sec)
       let vx = 0;
       let vy = 0;
       if (this.prevTorso) {
@@ -316,19 +275,17 @@ export class TorsoTracker {
         vy = (this.smoothedCentroid.y - this.prevTorso.torsoCenter.y) / dt;
       }
 
-      // Honest Confidence Score based on solid mass and stability
-      let confidence = 0.88;
-      if (this.consecutiveDetectionCount >= 2) confidence += 0.05;
-      if (aspectRatio >= 1.4 && aspectRatio <= 3.8) confidence += 0.05;
-      confidence = Math.min(0.99, Math.max(0.80, confidence));
+      // Confidence score based on solid mass
+      let confidence = 0.92;
+      if (foregroundPixelsCount >= 60) confidence = 0.98;
 
       const data: TorsoLandmarkData = {
         torsoCenter: { x: this.smoothedCentroid.x, y: this.smoothedCentroid.y },
         boundingBox: {
           x: minX / w,
           y: minY / h,
-          width: Math.max(0.06, bodyWidth),
-          height: Math.max(0.20, bodyHeight),
+          width: Math.max(0.04, objWidth),
+          height: Math.max(0.04, objHeight),
         },
         velocity: { vx: Math.round(vx * 100) / 100, vy: Math.round(vy * 100) / 100 },
         confidence: Math.round(confidence * 100) / 100,
