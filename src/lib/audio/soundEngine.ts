@@ -126,6 +126,30 @@ class SoundEngine {
     } catch {}
   }
 
+  // Countdown beep for solo athletic start (low beep for 3,2,1 and high burst for GO)
+  public playCountdownBeep(isFinal: boolean = false) {
+    if (this.isMuted) return;
+    this.initContext();
+    if (!this.ctx) return;
+
+    try {
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+
+      osc.type = isFinal ? "sawtooth" : "sine";
+      osc.frequency.setValueAtTime(isFinal ? 1200 : 600, now);
+
+      gain.gain.setValueAtTime(isFinal ? 0.6 : 0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + (isFinal ? 0.25 : 0.12));
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + (isFinal ? 0.3 : 0.15));
+    } catch {}
+  }
+
   // Finish line crossed celebration / bell
   public playFinishChime() {
     if (this.isMuted) return;

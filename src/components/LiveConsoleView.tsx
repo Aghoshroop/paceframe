@@ -19,8 +19,10 @@ import {
   Eye,
   CheckCircle2,
   AlertCircle,
-  Maximize2,
-  Minimize2,
+  Clock,
+  Sparkles,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import {
   Session,
@@ -36,7 +38,8 @@ import {
 import { TimingEngine } from "@/lib/timing/timingEngine";
 import { CameraManager } from "@/lib/vision/cameraManager";
 import { TorsoTracker, TorsoLandmarkData } from "@/lib/vision/torsoTracker";
-import { LineCrossingDetector } from "@/lib/vision/lineCrossingDetector";
+import { LineCrossingDetector, GateDetectionState } from "@/lib/vision/lineCrossingDetector";
+import { soundEngine } from "@/lib/audio/soundEngine";
 
 interface LiveConsoleViewProps {
   session: Session;
@@ -53,6 +56,8 @@ interface LiveConsoleViewProps {
   onOpenStudio: () => void;
   onManualTrigger: (type: "ARM" | "START" | "STOP") => void;
 }
+
+type StartMode = "hold_release" | "solo_countdown" | "instant_tap" | "camera_auto";
 
 export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
   session,
@@ -76,6 +81,12 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
   const [laps, setLaps] = useState<LapRecord[]>(timingEngine.getLaps());
   const [currentResult, setCurrentResult] = useState<TimingResult | null>(null);
 
+  // Start Mode Selection (Starter Pistol, Solo 3s Countdown, Instant Tap, Camera Auto)
+  const [startMode, setStartMode] = useState<StartMode>(
+    session.startMethod === "camera_automatic" ? "camera_auto" : "hold_release"
+  );
+  const [countdownNumber, setCountdownNumber] = useState<number | null>(null);
+
   // Hold & Release button state
   const [isHoldingStart, setIsHoldingStart] = useState<boolean>(false);
   const holdStartTimeRef = useRef<number>(0);
@@ -93,14 +104,15 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
 
-  // Visual feedback states
+  // Visual gate & runner feedback states
   const [isTorsoDetected, setIsTorsoDetected] = useState<boolean>(false);
-  const [isTorsoTouchingGate, setIsTorsoTouchingGate] = useState<boolean>(false);
+  const [torsoVelocity, setTorsoVelocity] = useState<number>(0);
+  const [gateDetectionState, setGateDetectionState] = useState<GateDetectionState>("WAITING_FOR_APPROACH");
   const [gateTriggeredFlash, setGateTriggeredFlash] = useState<boolean>(false);
   const [freezeFrameSnapshot, setFreezeFrameSnapshot] = useState<string | null>(null);
   const [showFreezeFrame, setShowFreezeFrame] = useState<boolean>(false);
 
-  // Line drag state on canvas
+  // Line dragging state on canvas
   const [isDraggingLine, setIsDraggingLine] = useState<boolean>(false);
   const zonesRef = useRef<DetectionZone[]>(zones);
   zonesRef.current = zones;
@@ -152,7 +164,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
           setFreezeFrameSnapshot(res.videoEvidence.finishFrame);
           setShowFreezeFrame(true);
         }
-        triggerHaptic([100, 50, 150]);
+        triggerHaptic([120, 60, 180]);
       },
     });
 
@@ -235,16 +247,18 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // 1. Optical Torso Tracking
+      // 1. Biomechanical Torso & Chest Tracking
       const torso = torsoTracker.trackFrame(video, frameTime);
       setIsTorsoDetected(!!torso);
+      if (torso) {
+        setTorsoVelocity(torso.velocity.vx);
+      }
 
       const activeZones = zonesRef.current;
       const currentTimingStatus = statusRef.current;
+      const isTimingRunning = currentTimingStatus === "running";
 
-      // 2. Draw Virtual Gates (Finish / Split / Start)
-      let touchingNow = false;
-
+      // 2. Render Virtual Gates (Razor Laser Finish & Split Gates)
       for (const zone of activeZones) {
         if (!zone.active) continue;
 
@@ -256,82 +270,94 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
         const midX = (x1 + x2) / 2;
         const midY = (y1 + y2) / 2;
 
-        // Check if torso is currently touching this line
-        let isTouching = false;
-        if (torso) {
-          const torsoMinX = torso.boundingBox.x * canvas.width;
-          const torsoMaxX = (torso.boundingBox.x + torso.boundingBox.width) * canvas.width;
-          const torsoCenterX = torso.torsoCenter.x * canvas.width;
-          isTouching =
-            (midX >= torsoMinX && midX <= torsoMaxX) ||
-            Math.abs(torsoCenterX - midX) <= canvas.width * 0.05;
-
-          if (isTouching) {
-            touchingNow = true;
-          }
+        const gStatus = lineDetector.getGateStatus(zone.zoneId);
+        if (zone.zoneType === "finish") {
+          setGateDetectionState(gStatus);
         }
 
+        const isApproaching = gStatus === "RUNNER_APPROACHING";
+        const isBroken = gStatus === "GATE_BROKEN" || gateTriggeredFlash;
+
         ctx.save();
-        // Dynamic Gate Styling (Glows White-Lime when touched)
-        ctx.strokeStyle = isTouching ? "#ffffff" : zone.color || "#ccff00";
-        ctx.lineWidth = isTouching ? 6 : 3.5;
-        ctx.shadowColor = isTouching ? "#ffffff" : zone.color || "#ccff00";
-        ctx.shadowBlur = isTouching ? 18 : 8;
+        // Laser Core & Glow
+        ctx.strokeStyle = isBroken
+          ? "#ffffff"
+          : isApproaching
+          ? "#ffff00"
+          : zone.color || "#ccff00";
+        ctx.lineWidth = isBroken ? 6 : isApproaching ? 4 : 2.5;
+        ctx.shadowColor = isBroken ? "#ffffff" : zone.color || "#ccff00";
+        ctx.shadowBlur = isBroken ? 24 : isApproaching ? 16 : 8;
 
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
 
-        // Direction indicator chevron
-        ctx.fillStyle = isTouching ? "#ffffff" : zone.color || "#ccff00";
+        // Top & Bottom Laser Pod Emitters
+        ctx.fillStyle = isBroken ? "#ffffff" : zone.color || "#ccff00";
         ctx.beginPath();
-        if (zone.detectionDirection === "left_to_right") {
-          ctx.moveTo(midX - 12, midY - 10);
-          ctx.lineTo(midX + 12, midY);
-          ctx.lineTo(midX - 12, midY + 10);
-        } else if (zone.detectionDirection === "right_to_left") {
-          ctx.moveTo(midX + 12, midY - 10);
-          ctx.lineTo(midX - 12, midY);
-          ctx.lineTo(midX + 12, midY + 10);
-        } else {
-          // Bidirectional circle marker
-          ctx.arc(midX, midY, 8, 0, 2 * Math.PI);
-        }
+        ctx.arc(x1, y1 + 10, 6, 0, 2 * Math.PI);
+        ctx.arc(x2, y2 - 10, 6, 0, 2 * Math.PI);
         ctx.fill();
 
-        // Zone Tag Label
-        ctx.fillStyle = isTouching ? "rgba(255, 255, 255, 0.95)" : "rgba(10, 12, 15, 0.88)";
+        // Center Gate Beacon
+        ctx.beginPath();
+        ctx.arc(midX, midY, isBroken ? 12 : 7, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Direction Indicators
+        if (zone.detectionDirection === "left_to_right") {
+          ctx.beginPath();
+          ctx.moveTo(midX - 10, midY - 8);
+          ctx.lineTo(midX + 10, midY);
+          ctx.lineTo(midX - 10, midY + 8);
+          ctx.fillStyle = isBroken ? "#000000" : "#0a0c0f";
+          ctx.fill();
+        } else if (zone.detectionDirection === "right_to_left") {
+          ctx.beginPath();
+          ctx.moveTo(midX + 10, midY - 8);
+          ctx.lineTo(midX - 10, midY);
+          ctx.lineTo(midX + 10, midY + 8);
+          ctx.fillStyle = isBroken ? "#000000" : "#0a0c0f";
+          ctx.fill();
+        }
+
+        // Tactical Gate Badge
+        const tagText = isBroken
+          ? "GATE BREAK RECORDED"
+          : isApproaching
+          ? "RUNNER APPROACHING"
+          : `${zone.name.toUpperCase()} ARMED`;
+
+        const badgeW = Math.max(110, tagText.length * 7.5);
+        ctx.fillStyle = isBroken
+          ? "rgba(255, 255, 255, 0.95)"
+          : isApproaching
+          ? "rgba(234, 179, 8, 0.9)"
+          : "rgba(10, 12, 15, 0.88)";
         ctx.strokeStyle = zone.color || "#ccff00";
         ctx.lineWidth = 1;
-        ctx.fillRect(midX - 52, y1 + 10, 104, 24);
-        ctx.strokeRect(midX - 52, y1 + 10, 104, 24);
+        ctx.fillRect(midX - badgeW / 2, y1 + 14, badgeW, 24);
+        ctx.strokeRect(midX - badgeW / 2, y1 + 14, badgeW, 24);
 
-        ctx.font = "bold 11px -apple-system, sans-serif";
-        ctx.fillStyle = isTouching ? "#0a0c0f" : zone.color || "#ccff00";
+        ctx.font = "bold 10px monospace";
+        ctx.fillStyle = isBroken ? "#0a0c0f" : isApproaching ? "#000000" : zone.color || "#ccff00";
         ctx.textAlign = "center";
-        ctx.fillText(
-          isTouching ? `TOUCHING ${zone.name.toUpperCase()}` : zone.name.toUpperCase(),
-          midX,
-          y1 + 26
-        );
+        ctx.fillText(tagText, midX, y1 + 30);
         ctx.restore();
       }
 
-      setIsTorsoTouchingGate(touchingNow);
-
-      // 3. Render Torso Centroid & Bounding Box
+      // 3. Render Athlete Torso Centroid & Chest Reticle
       if (torso) {
         const tx = torso.torsoCenter.x * canvas.width;
         const ty = torso.torsoCenter.y * canvas.height;
 
         ctx.save();
-        // Bounding Box
-        ctx.strokeStyle = touchingNow
-          ? "rgba(255, 255, 255, 0.9)"
-          : "rgba(204, 255, 0, 0.5)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([4, 4]);
+        // Bounding Box (Chest & Upper Body Focus)
+        ctx.strokeStyle = "rgba(204, 255, 0, 0.45)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 5]);
         ctx.strokeRect(
           torso.boundingBox.x * canvas.width,
           torso.boundingBox.y * canvas.height,
@@ -339,19 +365,28 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
           torso.boundingBox.height * canvas.height
         );
 
-        // Torso Target Reticle
+        // Sternum / Torso Target Crosshair
         ctx.strokeStyle = "#ffffff";
         ctx.lineWidth = 2.5;
+        ctx.setLineDash([]);
         ctx.beginPath();
-        ctx.arc(tx, ty, 18, 0, 2 * Math.PI);
+        ctx.arc(tx, ty, 16, 0, 2 * Math.PI);
         ctx.stroke();
 
-        ctx.fillStyle = touchingNow ? "#ffffff" : "#ccff00";
+        ctx.fillStyle = "#ccff00";
         ctx.beginPath();
-        ctx.arc(tx, ty, 6, 0, 2 * Math.PI);
+        ctx.arc(tx, ty, 5, 0, 2 * Math.PI);
         ctx.fill();
 
-        // Label Tag
+        // Horizontal chest plane indicator
+        ctx.strokeStyle = "rgba(204, 255, 0, 0.7)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(tx - 24, ty);
+        ctx.lineTo(tx + 24, ty);
+        ctx.stroke();
+
+        // Athlete Tracking HUD
         ctx.font = "bold 11px monospace";
         ctx.fillStyle = "#ffffff";
         ctx.shadowColor = "#000000";
@@ -359,11 +394,21 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
         ctx.fillText(
           `TORSO [${Math.round(torso.confidence * 100)}%]`,
           tx + 22,
-          ty + 4
+          ty - 4
         );
+
+        if (Math.abs(torso.velocity.vx) > 0.05) {
+          ctx.font = "10px monospace";
+          ctx.fillStyle = "#ccff00";
+          ctx.fillText(
+            `${torso.velocity.vx > 0 ? "▶" : "◀"} ${(Math.abs(torso.velocity.vx) * 10).toFixed(1)} m/s`,
+            tx + 22,
+            ty + 10
+          );
+        }
         ctx.restore();
 
-        // 4. Evaluate Crossing / Touch Events
+        // 4. Evaluate Crossing / Penetration Events (Only evaluate if running for finish, or idle for start)
         const crossings = lineDetector.evaluate(
           torso,
           activeZones,
@@ -371,20 +416,26 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
           sessionId,
           deviceId,
           deviceName,
-          clockOffsetMs
+          clockOffsetMs,
+          isTimingRunning
         );
 
         if (crossings.length > 0) {
           for (const c of crossings) {
-            // Flash on trigger
+            // If it's a finish line, ensure timing was actually running
+            if (c.zone.zoneType === "finish" && !isTimingRunning) {
+              continue;
+            }
+
+            // Flash gate visual
             setGateTriggeredFlash(true);
-            setTimeout(() => setGateTriggeredFlash(false), 900);
+            setTimeout(() => setGateTriggeredFlash(false), 800);
 
             setFreezeFrameSnapshot(c.frameSnapshot);
 
-            // Forward event to timing engine & network mesh
+            // Forward event to timing engine
             onTimingEventDetected(c.event);
-            triggerHaptic([60, 40, 100]);
+            triggerHaptic([80, 50, 120]);
           }
         }
       }
@@ -400,6 +451,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
       deviceName,
       clockOffsetMs,
       onTimingEventDetected,
+      gateTriggeredFlash,
     ]
   );
 
@@ -449,6 +501,26 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
     }
   };
 
+  // Quick Preset Gate Position
+  const setGatePreset = (presetPercent: number) => {
+    const xCoord = presetPercent / 100;
+    const updated = zones.map((z) => {
+      if (z.zoneType === "finish") {
+        return {
+          ...z,
+          lineCoordinates: {
+            ...z.lineCoordinates,
+            x1: xCoord,
+            x2: xCoord,
+          },
+        };
+      }
+      return z;
+    });
+    onUpdateZones(updated);
+    triggerHaptic(20);
+  };
+
   // Quick Nudge Line Position Buttons
   const nudgeLine = (delta: number) => {
     const updated = zones.map((z) => {
@@ -470,7 +542,9 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
     triggerHaptic(15);
   };
 
-  // Handle pointer interactions for Method A (Hold & Release)
+  // --- START PROCEDURES ---
+
+  // Procedure 1: Starter Pistol (Hold & Release)
   const handleStartPointerDown = (e: React.PointerEvent) => {
     if (status === "running") return;
     try {
@@ -489,29 +563,74 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
     setIsHoldingStart(false);
 
     const holdDuration = performance.now() - holdStartTimeRef.current;
-    if (holdDuration < 180) {
+    if (holdDuration < 160) {
       timingEngine.disarm();
       return;
     }
 
     if (status === "armed" || status === "idle") {
       const releaseTime = performance.now();
-      lineDetector.reset(); // clear any residual detector cooldown
+      lineDetector.reset(); // clear detector cooldowns
+      torsoTracker.reset();
       setShowFreezeFrame(false);
       timingEngine.manualOverride("START", releaseTime);
       onManualTrigger("START");
-      triggerHaptic([60, 40, 100]);
+      triggerHaptic([70, 40, 110]);
     }
   };
 
-  // Instant 1-tap start for quick testing or solo athletics
+  // Procedure 2: Solo Countdown (3... 2... 1... GO!)
+  const handleStartSoloCountdown = () => {
+    if (status === "running" || countdownNumber !== null) return;
+
+    lineDetector.reset();
+    torsoTracker.reset();
+    setShowFreezeFrame(false);
+    timingEngine.arm();
+
+    let count = 3;
+    setCountdownNumber(count);
+    soundEngine.playCountdownBeep(false);
+
+    const intervalId = setInterval(() => {
+      count -= 1;
+      if (count > 0) {
+        setCountdownNumber(count);
+        soundEngine.playCountdownBeep(false);
+      } else {
+        clearInterval(intervalId);
+        setCountdownNumber(null);
+        soundEngine.playCountdownBeep(true);
+        timingEngine.manualOverride("START", performance.now());
+        onManualTrigger("START");
+        triggerHaptic([80, 50, 120]);
+      }
+    }, 1000);
+  };
+
+  // Procedure 3: Instant 1-Tap Start
   const handleQuickTapStart = () => {
     if (status === "running") return;
     lineDetector.reset();
+    torsoTracker.reset();
     setShowFreezeFrame(false);
     timingEngine.manualOverride("START", performance.now());
     onManualTrigger("START");
-    triggerHaptic([60, 40, 100]);
+    triggerHaptic([70, 40, 110]);
+  };
+
+  // Procedure 4: Next Sprint / Re-Arm (Primary Trackside Loop)
+  const handleNextSprintReArm = () => {
+    timingEngine.reset();
+    lineDetector.reset();
+    torsoTracker.reset();
+    setCurrentResult(null);
+    setElapsedMs(0);
+    setSplits([]);
+    setLaps([]);
+    setShowFreezeFrame(false);
+    setCountdownNumber(null);
+    triggerHaptic(30);
   };
 
   const handleStopOrOverride = () => {
@@ -527,17 +646,6 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
       timingEngine.manualOverride("SPLIT");
       triggerHaptic(40);
     }
-  };
-
-  const handleReset = () => {
-    timingEngine.reset();
-    lineDetector.reset();
-    setCurrentResult(null);
-    setElapsedMs(0);
-    setSplits([]);
-    setLaps([]);
-    setShowFreezeFrame(false);
-    triggerHaptic(20);
   };
 
   // Format Elapsed Milliseconds
@@ -561,13 +669,13 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
       case "armed":
         return {
           bg: "bg-amber-950/80 border-amber-500/50 text-amber-300",
-          label: "ARMED // RELEASE TO FIRE",
+          label: countdownNumber !== null ? `COUNTDOWN ${countdownNumber}s` : "SET // RELEASE TO FIRE",
           pulse: true,
         };
       case "running":
         return {
           bg: "bg-[#ccff00]/15 border-[#ccff00]/50 text-[#ccff00]",
-          label: isTorsoTouchingGate ? "TOUCH DETECTED!" : "TIMING RUNNING // GATE ARMED",
+          label: elapsedMs < 400 ? "GATE PRIMING..." : "GATE ARMED // TIMING IN-FLIGHT",
           pulse: true,
         };
       case "split_detected":
@@ -579,16 +687,13 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
       case "finished":
         return {
           bg: "bg-emerald-950/80 border-emerald-500/50 text-emerald-300",
-          label: "STOPPED BY CAMERA GATE",
+          label: "OFFICIAL FINISH BREAK RECORDED",
           pulse: false,
         };
       default:
         return {
           bg: "bg-zinc-900 border-white/10 text-zinc-400",
-          label:
-            session.startMethod === "hold_and_release"
-              ? "READY // PRESS & HOLD START"
-              : "READY // CAMERA AUTO START",
+          label: "READY // GATE ACTIVE",
           pulse: false,
         };
     }
@@ -599,7 +704,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0a0c0f] p-2.5 sm:p-5 max-w-7xl mx-auto w-full overflow-y-auto no-overscroll pb-24 md:pb-8">
-      {/* Top Session Telemetry Bar */}
+      {/* Top Athlete & Session Header */}
       <div className="flex items-center justify-between gap-2 rounded-2xl border border-white/10 bg-zinc-950/90 p-3 sm:p-4 shadow-xl">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="flex h-9 w-9 sm:h-11 sm:w-11 items-center justify-center rounded-xl bg-zinc-900 border border-white/15 text-[#ccff00] flex-shrink-0">
@@ -633,21 +738,21 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
         </div>
       </div>
 
-      {/* Main Grid: Live Camera Gate + Digital Chronograph */}
+      {/* Main Trackside Cockpit: Live Camera Laser Gate + Digital Chronograph */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-5 my-3 sm:my-5 items-stretch">
-        {/* Left Column (Lg 7 cols): Live Camera Viewport with Virtual Finish Gate */}
+        {/* Left: Live Viewfinder with Virtual Laser Gate */}
         <div
           className={`lg:col-span-7 rounded-3xl border relative overflow-hidden bg-black shadow-2xl flex flex-col justify-between transition-all duration-300 ${
             gateTriggeredFlash
               ? "border-white ring-4 ring-[#ccff00] shadow-[0_0_50px_rgba(204,255,0,0.6)]"
-              : isTorsoTouchingGate
-              ? "border-[#ccff00] shadow-[0_0_30px_rgba(204,255,0,0.3)]"
+              : gateDetectionState === "RUNNER_APPROACHING"
+              ? "border-amber-400 shadow-[0_0_30px_rgba(251,191,36,0.25)]"
               : "border-white/15"
           }`}
-          style={{ minHeight: "280px" }}
+          style={{ minHeight: "300px" }}
         >
-          {/* Top Camera Status Header */}
-          <div className="relative z-20 flex items-center justify-between p-3 bg-gradient-to-b from-black/80 via-black/40 to-transparent">
+          {/* Top Camera HUD Overlay */}
+          <div className="relative z-20 flex items-center justify-between p-3 bg-gradient-to-b from-black/85 via-black/40 to-transparent">
             <div className="flex items-center gap-2">
               <div
                 className={`flex items-center gap-1.5 rounded-lg border px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider backdrop-blur-md ${
@@ -665,7 +770,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
                   {showFreezeFrame
                     ? "PHOTO-FINISH EVIDENCE"
                     : isCameraActive
-                    ? "OPTICAL GATE LIVE"
+                    ? "LASER GATE ACTIVE"
                     : "CAMERA OFFLINE"}
                 </span>
               </div>
@@ -673,17 +778,17 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
               {isTorsoDetected && !showFreezeFrame && (
                 <div
                   className={`rounded-lg border px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider backdrop-blur-md transition-colors ${
-                    isTorsoTouchingGate
-                      ? "border-[#ccff00] bg-[#ccff00] text-black animate-pulse"
-                      : "border-white/20 bg-zinc-900/80 text-white"
+                    gateDetectionState === "RUNNER_APPROACHING"
+                      ? "border-amber-400 bg-amber-500/20 text-amber-300 animate-pulse"
+                      : "border-[#ccff00]/40 bg-[#ccff00]/10 text-[#ccff00]"
                   }`}
                 >
-                  {isTorsoTouchingGate ? "TOUCHING GATE" : "TORSO DETECTED"}
+                  {gateDetectionState === "RUNNER_APPROACHING" ? "APPROACHING GATE" : "TORSO LOCKED"}
                 </div>
               )}
             </div>
 
-            {/* Camera Actions */}
+            {/* Quick Camera Actions */}
             <div className="flex items-center gap-1.5">
               {availableCameras.length > 1 && (
                 <button
@@ -703,15 +808,15 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
                       : "border-white/20 bg-zinc-900/80 text-zinc-300"
                   }`}
                 >
-                  {showFreezeFrame ? "View Live Cam" : "View Photo Finish"}
+                  {showFreezeFrame ? "Show Live Feed" : "Show Freeze Frame"}
                 </button>
               )}
             </div>
           </div>
 
-          {/* Video & Canvas Container */}
-          <div className="relative flex-1 w-full min-h-[220px] sm:min-h-[260px] flex items-center justify-center bg-zinc-950">
-            {/* Live Video Feed */}
+          {/* Video & Canvas Viewport */}
+          <div className="relative flex-1 w-full min-h-[230px] sm:min-h-[270px] flex items-center justify-center bg-zinc-950">
+            {/* Live Camera Stream */}
             <video
               ref={videoRef}
               playsInline
@@ -722,7 +827,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
               }`}
             />
 
-            {/* Overlay Canvas for Virtual Timing Line & Torso Reticle */}
+            {/* Precision Laser Line & Torso Crosshair Canvas */}
             <canvas
               ref={canvasRef}
               onPointerDown={handlePointerDown}
@@ -733,57 +838,69 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
               }`}
             />
 
-            {/* Freeze-Frame Photo-Finish Display on Stop */}
+            {/* Solo Countdown Full-Screen Visual */}
+            {countdownNumber !== null && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm z-30 animate-pulse">
+                <span className="text-8xl sm:text-9xl font-black font-mono text-[#ccff00] drop-shadow-[0_0_40px_rgba(204,255,0,0.8)]">
+                  {countdownNumber}
+                </span>
+                <span className="text-sm font-bold uppercase tracking-widest text-white mt-2">
+                  Get Set... Sprint!
+                </span>
+              </div>
+            )}
+
+            {/* Freeze-Frame Photo-Finish Display on Break */}
             {showFreezeFrame && freezeFrameSnapshot && (
-              <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center bg-black select-none">
+              <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center bg-black select-none z-20">
                 <img
                   src={freezeFrameSnapshot}
                   alt="Photo-Finish Freeze Frame"
                   className="w-full h-full object-contain"
                 />
-                <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between rounded-xl border border-emerald-500/50 bg-emerald-950/80 p-2.5 backdrop-blur-md">
+                <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between rounded-xl border border-emerald-500/50 bg-emerald-950/85 p-2.5 backdrop-blur-md">
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="h-4 w-4 text-emerald-400" />
                     <span className="text-[11px] font-mono text-emerald-200 font-bold">
-                      OFFICIAL TORSO CROSSING CAPTURED
+                      SUB-FRAME PHOTO-FINISH BREAK CAPTURED
                     </span>
                   </div>
                   <button
                     onClick={() => setShowFreezeFrame(false)}
                     className="rounded-lg bg-white text-black px-2.5 py-1 text-[10px] font-bold"
                   >
-                    Resume Live Feed
+                    View Live Feed
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Error or Fallback Message */}
+            {/* Camera Permission Error Notice */}
             {cameraError && !isCameraActive && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-zinc-950/90 z-10">
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-zinc-950/95 z-10">
                 <AlertCircle className="h-8 w-8 text-amber-400 mb-2" />
                 <h4 className="text-sm font-bold text-white mb-1">
                   Camera Sensor Initialization
                 </h4>
                 <p className="text-xs text-zinc-400 max-w-sm mb-3">
-                  Please grant camera permissions to enable automatic torso touch detection.
+                  Please allow camera permissions to enable automatic optical finish line tracking.
                 </p>
                 <button
                   onClick={() => startCameraStream()}
                   className="rounded-xl border border-[#ccff00]/40 bg-[#ccff00]/15 px-4 py-2 text-xs font-bold text-[#ccff00] hover:bg-[#ccff00]/25 transition-all"
                 >
-                  Retry Camera Connection
+                  Retry Camera Sensor
                 </button>
               </div>
             )}
           </div>
 
-          {/* Bottom Camera Toolbar: Quick Nudge Line Position */}
-          <div className="relative z-20 flex flex-wrap items-center justify-between gap-2 p-2.5 bg-gradient-to-t from-black/90 via-black/60 to-transparent border-t border-white/10 text-[10px] font-mono">
+          {/* Bottom Viewfinder Bar: Gate Alignment & Drag Tools */}
+          <div className="relative z-20 flex flex-wrap items-center justify-between gap-2 p-2.5 bg-gradient-to-t from-black/95 via-black/70 to-transparent border-t border-white/10 text-[10px] font-mono">
             <div className="flex items-center gap-1.5 text-zinc-400">
               <Sliders className="h-3.5 w-3.5 text-[#ccff00]" />
-              <span className="text-white font-bold">GATE POSITION:</span>
-              <span className="text-[#ccff00]">
+              <span className="text-white font-bold">GATE:</span>
+              <span className="text-[#ccff00] font-bold">
                 {Math.round(
                   (((finishZone?.lineCoordinates.x1 || 0.5) +
                     (finishZone?.lineCoordinates.x2 || 0.5)) /
@@ -792,40 +909,57 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
                 )}
                 %
               </span>
+              <span className="text-zinc-500 hidden sm:inline">(Drag line to align)</span>
             </div>
 
-            {/* Line Position Nudge Controls */}
+            {/* Quick Presets & Nudge Controls */}
             <div className="flex items-center gap-1">
               <button
-                onClick={() => nudgeLine(-0.04)}
-                className="rounded-lg border border-white/15 bg-zinc-900/90 px-2 py-1 text-zinc-300 hover:text-white active:scale-95 transition-all"
-                title="Move Gate Left"
+                onClick={() => setGatePreset(25)}
+                className="rounded-lg border border-white/15 bg-zinc-900/90 px-1.5 py-1 text-[9px] text-zinc-300 hover:text-white"
               >
-                ◀ Left
+                25%
               </button>
               <button
-                onClick={() => nudgeLine(0.04)}
-                className="rounded-lg border border-white/15 bg-zinc-900/90 px-2 py-1 text-zinc-300 hover:text-white active:scale-95 transition-all"
-                title="Move Gate Right"
+                onClick={() => setGatePreset(50)}
+                className="rounded-lg border border-white/15 bg-zinc-900/90 px-1.5 py-1 text-[9px] text-zinc-300 hover:text-white"
               >
-                Right ▶
+                Center
+              </button>
+              <button
+                onClick={() => setGatePreset(75)}
+                className="rounded-lg border border-white/15 bg-zinc-900/90 px-1.5 py-1 text-[9px] text-zinc-300 hover:text-white"
+              >
+                75%
+              </button>
+              <button
+                onClick={() => nudgeLine(-0.03)}
+                className="rounded-lg border border-white/15 bg-zinc-900/90 px-2 py-1 text-zinc-300 hover:text-white active:scale-95 transition-all"
+              >
+                ◀
+              </button>
+              <button
+                onClick={() => nudgeLine(0.03)}
+                className="rounded-lg border border-white/15 bg-zinc-900/90 px-2 py-1 text-zinc-300 hover:text-white active:scale-95 transition-all"
+              >
+                ▶
               </button>
               <button
                 onClick={onOpenStudio}
                 className="rounded-lg border border-[#ccff00]/30 bg-[#ccff00]/10 px-2.5 py-1 text-[#ccff00] font-bold active:scale-95 transition-all"
               >
-                Full Studio
+                Studio
               </button>
             </div>
           </div>
         </div>
 
-        {/* Right Column (Lg 5 cols): Chronograph Display & Start/Stop Controls */}
+        {/* Right: Chronograph, Trigger Methods & Post-Sprint Review */}
         <div className="lg:col-span-5 flex flex-col justify-between gap-3 sm:gap-4">
-          {/* Main Digital Chronograph Panel */}
+          {/* Main Chronograph Display */}
           <div className="flex-1 rounded-3xl border border-white/15 bg-gradient-to-b from-[#13171e] to-[#0c0e12] p-4 sm:p-6 shadow-2xl flex flex-col items-center justify-center relative overflow-hidden">
-            {/* Digital Numbers */}
-            <div className="relative z-10 flex items-baseline justify-center font-mono font-black tracking-tighter select-none py-2 sm:py-4">
+            {/* Stopwatch Digits */}
+            <div className="relative z-10 flex items-baseline justify-center font-mono font-black tracking-tighter select-none py-2 sm:py-3">
               {mm && (
                 <span className="text-3xl xs:text-4xl sm:text-6xl text-zinc-400">
                   {mm}
@@ -842,69 +976,160 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
               </span>
             </div>
 
-            {/* Telemetry Sub-bar */}
-            <div className="relative z-10 flex flex-wrap items-center justify-center gap-3 sm:gap-5 text-[10px] sm:text-xs font-mono text-zinc-400 mt-1">
+            {/* Sub-bar Telemetry */}
+            <div className="relative z-10 flex flex-wrap items-center justify-center gap-3 sm:gap-5 text-[10px] sm:text-xs font-mono text-zinc-400 mt-0.5">
               <div>
                 <span>SPLITS: </span>
                 <span className="font-bold text-white">{splits.length}</span>
               </div>
-              {session.targetLaps && session.targetLaps > 0 ? (
+              {session.distanceMeters && (
                 <div>
-                  <span>LAP: </span>
-                  <span className="font-bold text-[#ccff00]">
-                    {timingEngine.getCurrentLap()}/{session.targetLaps}
-                  </span>
+                  <span>GATE DIST: </span>
+                  <span className="font-bold text-[#ccff00]">{session.distanceMeters}m</span>
                 </div>
-              ) : null}
+              )}
               <div>
-                <span>FPS: </span>
-                <span className="font-bold text-emerald-400">
-                  {metrics.processingFps || 60}
-                </span>
+                <span>CAM FPS: </span>
+                <span className="font-bold text-emerald-400">{metrics.cameraFps || 60}</span>
               </div>
             </div>
 
-            {/* Finished Result Banner */}
+            {/* Official Finished Result Banner */}
             {status === "finished" && currentResult && (
-              <div className="relative z-10 mt-3 sm:mt-4 w-full flex flex-col sm:flex-row items-center justify-between gap-3 rounded-2xl border border-emerald-500/40 bg-emerald-950/80 p-3 sm:p-4 shadow-xl">
-                <div className="flex items-center gap-2.5">
-                  <Award className="h-6 w-6 sm:h-7 sm:w-7 text-emerald-400 flex-shrink-0" />
-                  <div>
-                    <div className="text-[9px] sm:text-[10px] font-mono text-emerald-300 uppercase tracking-wider font-bold">
-                      Stop Confirmed • Camera Gate
-                    </div>
-                    <div className="text-xl sm:text-2xl font-black text-white">
-                      {(currentResult.totalTimeMs / 1000).toFixed(3)}s
-                    </div>
-                    <div className="text-[9px] sm:text-[10px] text-zinc-300 font-mono">
-                      ±{currentResult.uncertaintyMs}ms • {currentResult.timingQuality}
+              <div className="relative z-10 mt-3 sm:mt-4 w-full flex flex-col gap-2.5 rounded-2xl border border-emerald-500/50 bg-emerald-950/85 p-3.5 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Award className="h-6 w-6 text-emerald-400 flex-shrink-0" />
+                    <div>
+                      <div className="text-[9px] font-mono text-emerald-300 uppercase tracking-wider font-bold">
+                        Official Sprint Time Recorded
+                      </div>
+                      <div className="text-2xl font-black text-white">
+                        {(currentResult.totalTimeMs / 1000).toFixed(3)}s
+                      </div>
                     </div>
                   </div>
+
+                  {currentResult.speedKmh && (
+                    <div className="text-right">
+                      <div className="text-[9px] font-mono text-zinc-400">VELOCITY</div>
+                      <div className="text-base font-bold text-[#ccff00]">
+                        {currentResult.speedKmh} km/h
+                      </div>
+                      <div className="text-[9px] font-mono text-zinc-400">
+                        {currentResult.speedMs} m/s
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <button
-                  onClick={() => onOpenResults(currentResult)}
-                  className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-xl bg-white text-black px-3.5 py-1.5 text-xs font-bold shadow-lg hover:bg-zinc-200 active:scale-95 transition-all"
-                >
-                  Inspect Evidence
-                  <ChevronRight className="h-3.5 w-3.5" />
-                </button>
+
+                <div className="flex items-center justify-between text-[10px] text-zinc-300 font-mono border-t border-emerald-500/20 pt-2">
+                  <span>Precision: ±{currentResult.uncertaintyMs}ms</span>
+                  <span className="text-emerald-300 font-semibold">{currentResult.timingQuality}</span>
+                </div>
+
+                {/* Tactical Actions on Finish */}
+                <div className="grid grid-cols-2 gap-2 mt-1">
+                  <button
+                    onClick={handleNextSprintReArm}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-[#ccff00] text-black py-2.5 px-3 text-xs font-black shadow-lg hover:bg-lime-400 active:scale-95 transition-all"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    Next Sprint (Re-Arm)
+                  </button>
+                  <button
+                    onClick={() => onOpenResults(currentResult)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-zinc-900 border border-white/20 text-white py-2.5 px-3 text-xs font-bold hover:bg-zinc-800 active:scale-95 transition-all"
+                  >
+                    Inspect Photo
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             )}
           </div>
 
-          {/* Timing Trigger Controls (Hold & Release or Camera Auto) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {session.startMethod === "hold_and_release" ? (
-              <>
+          {/* Trigger Methodology Selector (Only when not running) */}
+          {status !== "running" && status !== "finished" && (
+            <div className="flex rounded-xl bg-zinc-950 p-1 border border-white/10 text-[10px] font-mono font-bold">
+              <button
+                onClick={() => setStartMode("hold_release")}
+                className={`flex-1 py-1.5 rounded-lg transition-all ${
+                  startMode === "hold_release"
+                    ? "bg-[#ccff00] text-black shadow"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                Starter Pistol
+              </button>
+              <button
+                onClick={() => setStartMode("solo_countdown")}
+                className={`flex-1 py-1.5 rounded-lg transition-all ${
+                  startMode === "solo_countdown"
+                    ? "bg-[#ccff00] text-black shadow"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                Solo Countdown
+              </button>
+              <button
+                onClick={() => setStartMode("instant_tap")}
+                className={`flex-1 py-1.5 rounded-lg transition-all ${
+                  startMode === "instant_tap"
+                    ? "bg-[#ccff00] text-black shadow"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                1-Tap
+              </button>
+              <button
+                onClick={() => setStartMode("camera_auto")}
+                className={`flex-1 py-1.5 rounded-lg transition-all ${
+                  startMode === "camera_auto"
+                    ? "bg-[#ccff00] text-black shadow"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                Auto Gate
+              </button>
+            </div>
+          )}
+
+          {/* Start / Stop Trigger Buttons based on Mode */}
+          {status === "running" ? (
+            <div className="flex gap-2">
+              <button
+                onClick={handleStopOrOverride}
+                className="flex-1 flex items-center justify-center gap-2 rounded-2xl border border-red-500/50 bg-red-950/70 p-4 text-sm font-bold text-red-200 active:scale-95 shadow-lg transition-all"
+              >
+                <Square className="h-4 w-4" />
+                Manual Stop
+              </button>
+              <button
+                onClick={handleManualSplit}
+                className="flex-1 flex items-center justify-center gap-1.5 rounded-2xl border border-white/15 bg-zinc-900 p-4 text-xs font-bold text-zinc-200 active:scale-95 transition-all"
+              >
+                <Flag className="h-4 w-4 text-[#ccff00]" />
+                Split Gate
+              </button>
+            </div>
+          ) : status === "finished" ? (
+            <button
+              onClick={handleNextSprintReArm}
+              className="w-full flex items-center justify-center gap-2 rounded-2xl border border-[#ccff00]/60 bg-[#ccff00]/15 hover:bg-[#ccff00]/25 p-4 text-sm font-black text-[#ccff00] uppercase tracking-wider active:scale-95 transition-all shadow-lg"
+            >
+              <RotateCcw className="h-4 w-4" />
+              Re-Arm Gate for Next Sprint
+            </button>
+          ) : (
+            <div>
+              {startMode === "hold_release" && (
                 <button
                   onPointerDown={handleStartPointerDown}
                   onPointerUp={handleStartPointerUp}
-                  disabled={status === "running"}
-                  className={`relative flex flex-col items-center justify-center rounded-2xl border p-4 sm:p-5 select-none transition-all touch-none min-h-[85px] sm:min-h-[100px] ${
+                  className={`w-full relative flex flex-col items-center justify-center rounded-2xl border p-4 sm:p-5 select-none transition-all touch-none min-h-[90px] ${
                     isHoldingStart
                       ? "border-amber-400 bg-amber-500/25 shadow-[0_0_35px_rgba(245,158,11,0.35)] scale-[0.98]"
-                      : status === "running"
-                      ? "border-white/10 bg-zinc-950/40 opacity-40 cursor-not-allowed"
                       : "border-[#ccff00]/60 bg-[#ccff00]/15 hover:bg-[#ccff00]/25 shadow-[0_0_20px_rgba(204,255,0,0.15)] active:scale-[0.98]"
                   }`}
                 >
@@ -914,101 +1139,81 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
                     }`}
                   />
                   <span className="text-xs sm:text-sm font-black tracking-wider text-white uppercase text-center">
-                    {isHoldingStart ? "RELEASE TO START" : "HOLD & RELEASE START"}
+                    {isHoldingStart ? "RELEASE THUMB TO FIRE SPRINT!" : "PRESS & HOLD TO ARM"}
                   </span>
                   <span className="text-[9px] font-mono text-zinc-400 mt-0.5">
-                    {isHoldingStart ? "Hold firmly until athlete starts" : "Hold thumb to arm"}
+                    {isHoldingStart ? "On your marks... Set... RELEASE!" : "Hold thumb firmly, release on start gun"}
                   </span>
                 </button>
+              )}
 
-                {/* 1-Tap Quick Start Option for Solo Training */}
+              {startMode === "solo_countdown" && (
+                <button
+                  onClick={handleStartSoloCountdown}
+                  className="w-full flex flex-col items-center justify-center rounded-2xl border border-white/20 bg-zinc-900/90 hover:bg-zinc-800 p-4 min-h-[90px] active:scale-95 transition-all"
+                >
+                  <Clock className="h-6 w-6 mb-1 text-[#ccff00]" />
+                  <span className="text-xs sm:text-sm font-black tracking-wider text-white uppercase">
+                    Start 3-Second Countdown
+                  </span>
+                  <span className="text-[9px] font-mono text-zinc-400 mt-0.5">
+                    Gives solo runner 3 seconds to take stance
+                  </span>
+                </button>
+              )}
+
+              {startMode === "instant_tap" && (
                 <button
                   onClick={handleQuickTapStart}
-                  disabled={status === "running"}
-                  className={`flex flex-col items-center justify-center rounded-2xl border p-4 select-none transition-all min-h-[85px] sm:min-h-[100px] ${
-                    status === "running"
-                      ? "border-white/10 bg-zinc-950/40 opacity-40 cursor-not-allowed"
-                      : "border-white/15 bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 active:scale-95"
-                  }`}
+                  className="w-full flex flex-col items-center justify-center rounded-2xl border border-[#ccff00]/50 bg-[#ccff00]/15 hover:bg-[#ccff00]/25 p-4 min-h-[90px] active:scale-95 transition-all"
                 >
-                  <Play className="h-5 w-5 mb-1 text-white" />
-                  <span className="text-xs font-bold uppercase tracking-wider text-white">
-                    1-Tap Quick Start
+                  <Play className="h-6 w-6 mb-1 text-[#ccff00]" />
+                  <span className="text-xs sm:text-sm font-black tracking-wider text-white uppercase">
+                    1-Tap Instant Start
                   </span>
                   <span className="text-[9px] font-mono text-zinc-400 mt-0.5">
-                    Tap to run instantly
+                    Starts chronograph immediately
                   </span>
                 </button>
-              </>
-            ) : (
-              <div className="col-span-1 sm:col-span-2 rounded-2xl border border-white/10 bg-zinc-950 p-4 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="rounded-xl bg-[#ccff00]/10 p-2 text-[#ccff00]">
-                    <Camera className="h-5 w-5" />
+              )}
+
+              {startMode === "camera_auto" && (
+                <div className="rounded-2xl border border-white/10 bg-zinc-950 p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="rounded-xl bg-[#ccff00]/10 p-2 text-[#ccff00]">
+                      <Camera className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                        Automatic Camera Gate Armed
+                      </h4>
+                      <p className="text-[10px] text-zinc-400">
+                        Timer triggers automatically when crossing start gate.
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">
-                      Optical Start & Finish Armed
-                    </h4>
-                    <p className="text-[10px] text-zinc-400">
-                      Timer automatically starts & stops on camera gate.
-                    </p>
-                  </div>
+                  <button
+                    onClick={handleQuickTapStart}
+                    className="rounded-xl border border-white/15 bg-zinc-900 px-3 py-1.5 text-[11px] font-bold text-white active:scale-95 transition-all"
+                  >
+                    Manual Run
+                  </button>
                 </div>
-                <button
-                  onClick={handleQuickTapStart}
-                  disabled={status === "running"}
-                  className="rounded-xl border border-white/15 bg-zinc-900 px-3 py-1.5 text-[11px] font-bold text-white active:scale-95 transition-all"
-                >
-                  Manual Start
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Action Row: Stop Sprint (Manual Override) or New Attempt */}
-          <div className="flex gap-2">
-            {status === "running" ? (
-              <>
-                <button
-                  onClick={handleStopOrOverride}
-                  className="flex-1 flex items-center justify-center gap-2 rounded-2xl border border-red-500/50 bg-red-950/70 p-3 sm:p-4 text-xs sm:text-sm font-bold text-red-300 active:scale-95 shadow-lg transition-all"
-                >
-                  <Square className="h-4 w-4" />
-                  Manual Stop
-                </button>
-                <button
-                  onClick={handleManualSplit}
-                  className="flex-1 flex items-center justify-center gap-1.5 rounded-2xl border border-white/15 bg-zinc-900 p-3 sm:p-4 text-xs font-bold text-zinc-200 active:scale-95 transition-all"
-                >
-                  <Flag className="h-4 w-4 text-[#ccff00]" />
-                  Split
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={handleReset}
-                className="w-full flex items-center justify-center gap-2 rounded-2xl border border-white/15 bg-zinc-950 p-3.5 sm:p-4 text-zinc-300 hover:text-white active:scale-95 transition-all shadow-lg"
-              >
-                <RotateCcw className="h-4 w-4 text-[#ccff00]" />
-                <span className="text-xs font-black uppercase tracking-wider">
-                  New Attempt // Reset Clock
-                </span>
-              </button>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Splits Table with Sub-Frame Photo Thumbnails */}
+      {/* Splits Table with Verified Photo-Finish Evidence Thumbnails */}
       <div className="rounded-2xl border border-white/10 bg-zinc-950 p-3 sm:p-4 shadow-xl">
         <div className="flex items-center justify-between mb-2 sm:mb-3">
           <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
             <Flag className="h-3.5 w-3.5 text-[#ccff00]" />
-            Split Gates ({splits.length})
+            Split Gates & Interval Times ({splits.length})
           </h3>
           <span className="text-[10px] font-mono text-zinc-500">
-            Automatic Photo-Finish Verification
+            Validated Sub-Frame Photofinish
           </span>
         </div>
 
@@ -1025,6 +1230,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
                   <th className="pb-1.5">Gate</th>
                   <th className="pb-1.5">Interval</th>
                   <th className="pb-1.5">Cumulative</th>
+                  <th className="pb-1.5">Velocity</th>
                   <th className="pb-1.5">Evidence</th>
                 </tr>
               </thead>
@@ -1040,6 +1246,9 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
                     </td>
                     <td className="py-2 text-white font-bold">
                       {(s.elapsedMs / 1000).toFixed(3)}s
+                    </td>
+                    <td className="py-2 text-[#ccff00] font-bold">
+                      {s.speedKmh ? `${s.speedKmh} km/h` : "—"}
                     </td>
                     <td className="py-2">
                       {s.frameReference ? (

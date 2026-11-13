@@ -157,6 +157,8 @@ export interface TimingResult {
   startTime: number;
   finishTime: number;
   totalTimeMs: number;
+  speedKmh?: number;
+  speedMs?: number;
   splitTimes: SplitRecord[];
   lapTimes: LapRecord[];
   timingQuality: TimingQuality;

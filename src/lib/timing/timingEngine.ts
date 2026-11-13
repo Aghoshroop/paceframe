@@ -281,8 +281,15 @@ export class TimingEngine {
       return null;
     }
 
+    const totalTimeMs = Math.max(0, event.synchronizedTimestamp - this.startTime);
+
+    // Safeguard: Filter out premature false triggers (< 400ms after start)
+    // Prevents accidental finish triggers from athletes or objects near the gate at gun release
+    if (totalTimeMs < 400) {
+      return null;
+    }
+
     this.finishTime = event.synchronizedTimestamp;
-    const totalTimeMs = Math.max(0, this.finishTime - this.startTime);
 
     if (event.frameReference) {
       this.videoEvidence.finishFrame = event.frameReference;
@@ -324,6 +331,13 @@ export class TimingEngine {
       timingQuality = "high_confidence";
     }
 
+    let speedKmh: number | undefined;
+    let speedMs: number | undefined;
+    if (this.session.distanceMeters && this.session.distanceMeters > 0 && totalTimeMs > 0) {
+      speedMs = Math.round((this.session.distanceMeters / (totalTimeMs / 1000)) * 100) / 100;
+      speedKmh = Math.round(speedMs * 3.6 * 10) / 10;
+    }
+
     const result: TimingResult = {
       resultId: `res_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       sessionId: this.session.sessionId,
@@ -336,6 +350,8 @@ export class TimingEngine {
       startTime: this.startTime,
       finishTime: this.finishTime,
       totalTimeMs: Math.round(totalTimeMs * 10) / 10,
+      speedKmh,
+      speedMs,
       splitTimes: [...this.splits],
       lapTimes: [...this.laps],
       timingQuality,

@@ -8,8 +8,12 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
-  experimental: {
-    cpus: 1,
+  webpack: (config, { dev }) => {
+    if (dev) {
+      // Disable Webpack disk gzip caching in dev to prevent Array buffer allocation failures on Windows
+      config.cache = false;
+    }
+    return config;
   },
 };
 
